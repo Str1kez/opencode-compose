@@ -1,0 +1,63 @@
+name: opencode
+
+services:
+  opencode:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-debian:trixie-slim}
+        EXTRA_APT_PACKAGES: ${EXTRA_APT_PACKAGES:-}
+        OPENCODE_UID: ${OPENCODE_UID:-1000}
+        OPENCODE_GID: ${OPENCODE_GID:-1000}
+    image: opencode-server:local
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${OPENCODE_PORT:-4096}:4096"
+    environment:
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:?set OPENCODE_SERVER_PASSWORD in .env}
+      # Lets `docker compose exec opencode opencode ... --server http://127.0.0.1:4096`
+      # authenticate against the server above.
+      OPENCODE_PASSWORD: ${OPENCODE_SERVER_PASSWORD}
+      OPENCODE_UPDATE_HOUR: ${OPENCODE_UPDATE_HOUR:-4}
+      # Updates are handled by opencode-update; the built-in updater must not race it.
+      OPENCODE_DISABLE_AUTOUPDATE: "true"
+      TZ: ${TZ:-Europe/Moscow}
+      HOST_LOOPBACK_PORTS: ${HOST_LOOPBACK_PORTS:-}
+    # The repository is mounted at the same absolute path as on the host, so session
+    # directories match between the host CLI and the server.
+    working_dir: ${WORKSPACE:?set WORKSPACE in .env}
+    volumes:
+      - type: bind
+        source: ${WORKSPACE}
+        target: ${WORKSPACE}
+        bind:
+          create_host_path: false
+      - type: volume
+        source: opencode-home
+        target: /home/opencode
+      - type: bind
+        source: ${HOST_OPENCODE_CONFIG:-${HOME}/.config/opencode}
+        target: /home/opencode/.config/opencode
+        read_only: true
+        bind:
+          create_host_path: false
+      # create_host_path: false makes a missing file fail loudly instead of Docker
+      # silently creating a directory in its place on the host.
+      - type: bind
+        source: ${HOST_GITCONFIG:-${HOME}/.gitconfig}
+        target: /home/opencode/.gitconfig
+        read_only: true
+        bind:
+          create_host_path: false
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:4096/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+volumes:
+  opencode-home:

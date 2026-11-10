@@ -1,0 +1,13 @@
+# Optional per-machine mounts. Copy to docker-compose.override.yml (gitignored) and
+# keep only the lines that apply to you.
+services:
+  opencode:
+    volumes:
+      # Global skills shared between agents.
+      - ${HOME}/.agents:/home/opencode/.agents:ro
+      # Global gitignore and other git config files.
+      - ${HOME}/.config/git:/home/opencode/.config/git:ro
+      # Absolute symlinks inside the configs above (the container prints them as
+      # "broken symlink" at start) resolve only when their target is mounted at the
+      # same absolute path. One line per target directory.
+      - ${HOME}/dotfiles:${HOME}/dotfiles:ro
