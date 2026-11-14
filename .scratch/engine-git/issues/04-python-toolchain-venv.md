@@ -17,4 +17,4 @@
 - [x] визард даёт дописать dev-библиотеки проекта поверх профиля (libpq-dev, libffi-dev и подобные)
 - [x] дефолт `EXTRA_APT_PACKAGES` больше не содержит `python3-dev`
 - [x] смоук: на тестовом питон-проекте в контейнере `uv sync` проходит и `.venv/bin/python -c` отрабатывает
-- [ ] `shellcheck` на `scripts/setup.sh` чист
+- [x] `shellcheck` на `scripts/setup.sh` чист

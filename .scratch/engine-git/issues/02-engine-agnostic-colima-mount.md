@@ -14,4 +14,4 @@
 - [x] при добавлении mount визард предупреждает, что `colima stop && start` оборвёт остальные контейнеры пользователя
 - [x] compose не содержит движок-специфичных веток
 - [ ] смоук: харнесс поднимается на colima, сервер отвечает на healthcheck
-- [ ] `shellcheck` на `scripts/setup.sh` чист
+- [x] `shellcheck` на `scripts/setup.sh` чист

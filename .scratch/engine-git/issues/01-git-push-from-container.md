@@ -18,4 +18,4 @@
 - [x] known_hosts собирается через `ssh-keyscan` по хосту из remote репозитория; fingerprint показан пользователю на сверку
 - [x] `.env` и сгенерированные файлы с путём к ключу и known_hosts не попадают в git
 - [x] смоук: поднять харнесс и убедиться, что push из контейнера в тестовый remote проходит
-- [ ] `shellcheck` на `scripts/setup.sh` и `docker/entrypoint.sh` чист
+- [x] `shellcheck` на `scripts/setup.sh` и `docker/entrypoint.sh` чист
