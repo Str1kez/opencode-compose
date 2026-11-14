@@ -168,3 +168,17 @@ second=$(venv_volume_name "/work/a/b-c")
 [[ "$first" != "$second" ]] || fail "similar paths share a venv volume"
 [[ "$first" =~ ^opencode-venv-[a-z0-9-]+$ ]] || fail "bad volume name: $first"
 pass "helpers: sh_quote, unverifiable mount, per-path venv volume"
+
+# colima refuses overlapping mounts: a WORKSPACE inside $HOME must not get a mount of its own.
+(
+  HOME="/Users/someone"
+  # shellcheck disable=SC2034  # read by set_colima_start from wizard-lib.sh
+  COLIMA_PROFILE=default
+  set_colima_start "/Users/someone/code/repo"
+  [[ "${COLIMA_START[*]}" == "colima start --mount /Users/someone:w" ]] \
+    || fail "workspace inside HOME: got '${COLIMA_START[*]}'"
+  set_colima_start "/opt/repo"
+  [[ "${COLIMA_START[*]}" == "colima start --mount /opt/repo:w --mount /Users/someone:w" ]] \
+    || fail "workspace outside HOME: got '${COLIMA_START[*]}'"
+)
+pass "colima start: no overlapping mounts, HOME always kept"

@@ -488,14 +488,17 @@ colima_command() {
 
 # Sets COLIMA_START to the start command that makes WORKSPACE visible in the VM.
 # `colima start --mount` replaces the whole mount list, including the default
-# $HOME that holds the configs the container mounts, so $HOME is passed again.
+# $HOME that holds the configs the container mounts, so $HOME is always passed.
+# colima refuses overlapping mounts, so a WORKSPACE inside $HOME is covered by
+# $HOME alone and gets no mount of its own.
 set_colima_start() {
   local workspace="$1"
   colima_command start
   COLIMA_START=("${COLIMA_CMD[@]}")
   if [[ "$workspace" != "$HOME" && "$workspace" != "$HOME"/* ]]; then
-    COLIMA_START+=(--mount "$workspace:w" --mount "$HOME:w")
+    COLIMA_START+=(--mount "$workspace:w")
   fi
+  COLIMA_START+=(--mount "$HOME:w")
 }
 
 # Prints a command array as a copy-pasteable shell line.
