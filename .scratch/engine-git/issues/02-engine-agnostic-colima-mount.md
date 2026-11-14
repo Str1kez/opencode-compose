@@ -6,6 +6,8 @@
 
 **Status:** ready-for-agent
 
+**Модель реализации:** sonnet, medium — детекция движка и проверка mount в визарде, обычная логика
+
 - [ ] визард детектит доступный движок и не падает ни на colima, ни на OrbStack, ни на Docker Desktop
 - [x] на colima без WORKSPACE в mount визард печатает точную `colima start --mount $WORKSPACE:w`
 - [x] визард не стартует и не перезапускает colima без явного подтверждения пользователя

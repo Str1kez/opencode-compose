@@ -10,6 +10,18 @@ Issues and specs for this repo live as markdown files in `.scratch/`.
 - Triage state is recorded as a `Status:` line near the top of each issue file (see `triage-labels.md` for the role strings)
 - Comments and conversation history append to the bottom of the file under a `## Comments` heading
 
+## Модель для реализации
+
+При нарезке на тикеты каждый тикет получает строку `**Модель реализации:** <sonnet|opus>, <low|medium|high> — <причина в несколько слов>`, сразу после `**Исполнение:**`. Агент `coder` по умолчанию работает на sonnet; ведущий агент тикета передаёт модель и effort из этой строки параметрами `model` и `effort` при запуске субагента.
+
+- `sonnet` по умолчанию: обычная бизнес-логика, команды, хендлеры, рендеринг, CRUD по готовым швам.
+- `opus`, если есть хотя бы одно из: новый шов или контракт между слоями, транзакции и конкурентность, миграции с данными, неочевидный алгоритм, решение, которое трудно откатить.
+- `effort`: `low` для механики без ветвлений (маршрутизация, конфигурация, документация); `medium` для обычной логики; `high` для тикетов с `opus` и для всего, где ошибка проявляется только под конкуренцией или на границе слоёв.
+- Ревью диффа идёт на модели `code-reviewer` (opus) и строкой не задаётся.
+- Тикет реализует субагент `coder`: модель и effort из строки передаются параметрами запуска. `general-purpose` исполнителем тикета не берётся.
+- Git-операции (удалить ветку, влить ветку, `git status`) оркестратор делает сам: субагент на такую команду стоит дороже самой команды.
+- Строка относится к субагенту-исполнителю. Субагент для тестов берёт ту же модель, что и исполнитель.
+
 ## When a skill says "publish to the issue tracker"
 
 Create a new file under `.scratch/<feature-slug>/` (creating the directory if needed).
