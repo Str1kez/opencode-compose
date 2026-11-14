@@ -4,6 +4,7 @@ services:
   opencode:
     build:
       context: .
+      dockerfile: docker/Dockerfile
       args:
         BASE_IMAGE: ${BASE_IMAGE:-debian:trixie-slim}
         EXTRA_APT_PACKAGES: ${EXTRA_APT_PACKAGES:-}

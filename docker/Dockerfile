@@ -34,7 +34,7 @@ RUN group=$(awk -F: -v gid="$OPENCODE_GID" '$3 == gid { print $1 }' /etc/group);
 
 ARG INSTALL_UV=0
 RUN --mount=type=bind,from=uv,source=/uv,target=/tmp/uv \
-    if [ "$INSTALL_UV" = 1 ]; then install -m 755 /tmp/uv /usr/local/bin/uv; fi
+    if [ "$INSTALL_UV" = "1" ]; then install -m 755 /tmp/uv /usr/local/bin/uv; fi
 
 # A named volume mounted over WORKSPACE/.venv keeps the container venv apart from the
 # host one (ADR 0003). A fresh volume copies the owner of its mount point from the
