@@ -6,6 +6,8 @@
 
 **Status:** ready-for-agent
 
+**Модель реализации:** sonnet, low — документация без ветвлений
+
 - [ ] README рекомендует colima как дефолт и описывает установку
 - [ ] разобран подвох colima mount для WORKSPACE вне `$HOME`
 - [ ] задокументирован git-доступ: deploy-ключ без passphrase и его добавление в GitLab

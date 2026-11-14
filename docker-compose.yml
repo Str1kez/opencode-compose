@@ -26,6 +26,10 @@ services:
       OPENCODE_DISABLE_AUTOUPDATE: "true"
       TZ: ${TZ:-Europe/Moscow}
       HOST_LOOPBACK_PORTS: ${HOST_LOOPBACK_PORTS:-}
+      # The wizard points git at the mounted key and known_hosts (see docker-compose.override.yml).
+      # An env var instead of core.sshCommand: the host .gitconfig is mounted read-only and
+      # its include/includeIf targets may not exist in the container.
+      GIT_SSH_COMMAND: ${GIT_SSH_COMMAND:-ssh}
     # The repository is mounted at the same absolute path as on the host, so session
     # directories match between the host CLI and the server.
     working_dir: ${WORKSPACE:?set WORKSPACE in .env}
