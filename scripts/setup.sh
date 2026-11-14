@@ -204,6 +204,9 @@ readonly DEFAULT_BASE_IMAGE="debian:trixie-slim"
 readonly DEFAULT_APT_PACKAGES="build-essential python3-dev"
 readonly HEALTH_TIMEOUT_SECONDS=900
 readonly OVERRIDE_FILE="docker-compose.override.yml"
+readonly KNOWN_HOSTS_FILE=".git-ssh/known_hosts"
+readonly CONTAINER_GIT_KEY="/run/git-ssh/id"
+readonly CONTAINER_KNOWN_HOSTS="/run/git-ssh/known_hosts"
 
 expand_path() {
   local path="$1"
@@ -380,9 +383,133 @@ wait_until_ready() {
   return 1
 }
 
+# Prints private keys in ~/.ssh (files whose first line is a PEM/OpenSSH private key header).
+ssh_private_keys() {
+  local file
+  for file in "$HOME"/.ssh/*; do
+    [[ -f "$file" && "$file" != *.pub ]] || continue
+    if head -n1 "$file" 2>/dev/null | grep -q -- '-----BEGIN .*PRIVATE KEY-----'; then
+      printf '%s\n' "$file"
+    fi
+  done
+}
+
+# Succeeds when the key opens with an empty passphrase. There is no ssh-agent in the
+# container, so a key with a passphrase can't be used there at all.
+key_has_no_passphrase() {
+  ssh-keygen -y -P "" -f "$1" </dev/null >/dev/null 2>&1
+}
+
+# Prints "host port" of an ssh git remote (ssh://[user@]host[:port]/path or the scp-like
+# [user@]host:path). Fails for https and local remotes. The host is validated because
+# it goes to ssh-keyscan as an argument.
+ssh_remote_host() {
+  local url="$1" authority host port=""
+  case "$url" in
+    ssh://* | git+ssh://* | ssh+git://*)
+      authority="${url#*://}"
+      authority="${authority%%/*}"
+      authority="${authority##*@}"
+      host="${authority%%:*}"
+      [[ "$authority" == *:* ]] && port="${authority#*:}"
+      ;;
+    *://*) return 1 ;;
+    *:*)
+      authority="${url%%:*}"
+      [[ "$authority" == */* ]] && return 1
+      host="${authority##*@}"
+      ;;
+    *) return 1 ;;
+  esac
+  port="${port:-22}"
+  [[ "$host" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && "$port" =~ ^[0-9]+$ ]] || return 1
+  printf '%s %s\n' "$host" "$port"
+}
+
+# Push URL of the repository's origin remote, or of its first remote when there is no origin.
+workspace_remote_url() {
+  local workspace="$1" remote
+  remote=$(git -C "$workspace" remote 2>/dev/null | grep -x origin || git -C "$workspace" remote 2>/dev/null | head -n1) || return 1
+  [[ -n "$remote" ]] || return 1
+  git -C "$workspace" remote get-url --push "$remote"
+}
+
+# Interactive part of the "Git-доступ по SSH" stage. On success appends the key and
+# known_hosts mounts to extra_mounts and sets git_ssh_command; fails when the user skips.
+configure_git_ssh() {
+  local remote_url host_port host port keys key choice scan
+  if ! command -v git >/dev/null 2>&1 || ! command -v ssh-keyscan >/dev/null 2>&1; then
+    warn "на хосте нет git или ssh-keyscan, настроить push не получится"
+    return 1
+  fi
+  if ! remote_url=$(workspace_remote_url "$WORKSPACE"); then
+    warn "в $WORKSPACE нет git remote, пушить некуда"
+    return 1
+  fi
+  if ! host_port=$(ssh_remote_host "$remote_url"); then
+    warn "remote $remote_url не ssh. Пока поддержан только push по ssh."
+    return 1
+  fi
+  read -r host port <<< "$host_port"
+  say "Remote: $remote_url (хост $host, порт $port)"
+
+  keys=$(ssh_private_keys)
+  if [[ -z "$keys" ]]; then
+    warn "в $HOME/.ssh нет приватных ключей. Создай deploy-ключ: ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_deploy"
+    return 1
+  fi
+  while true; do
+    printf '\n'
+    say "Приватные ключи в $HOME/.ssh:"
+    nl -w3 -s'. ' <<< "$keys" | while IFS= read -r line; do say "$line"; done
+    ask GIT_SSH_KEY "Номер или путь к ключу:"
+    choice="${GIT_SSH_KEY:-}"
+    if [[ "$choice" =~ ^[0-9]+$ ]]; then
+      key=$(sed -n "${choice}p" <<< "$keys")
+    else
+      key=$(expand_path "$choice")
+    fi
+    if [[ -z "$key" || ! -f "$key" ]]; then
+      warn "ключа '$choice' нет"
+      continue
+    fi
+    if key_has_no_passphrase "$key"; then
+      break
+    fi
+    printf '\n'
+    warn "на ключе $key стоит passphrase."
+    warn "В контейнере нет ssh-agent, ввести её некому: push этим ключом не пройдёт."
+    say "Заведи отдельный deploy-ключ без passphrase и добавь его в GitLab/GitHub с правом записи:"
+    say "  ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_deploy"
+    confirm "Всё равно взять этот ключ?" && break
+  done
+  write_env GIT_SSH_KEY "$key"
+
+  printf '\n'
+  step "ssh-keyscan $host:$port"
+  scan=$(ssh-keyscan -T 10 -p "$port" "$host" 2>/dev/null || true)
+  if [[ -z "$scan" ]]; then
+    warn "хост $host:$port не ответил на ssh-keyscan"
+    return 1
+  fi
+  say "Ключи хоста. Сверь fingerprint с опубликованным у провайдера (у GitHub и GitLab он"
+  say "есть в документации) или спроси у админа сервера:"
+  ssh-keygen -lf - <<< "$scan" | while IFS= read -r line; do step "$line"; done
+  if ! confirm "Fingerprint совпадает?"; then
+    warn "fingerprint не подтверждён, known_hosts не пишу"
+    return 1
+  fi
+  mkdir -p "$(dirname "$KNOWN_HOSTS_FILE")"
+  printf '%s\n' "$scan" > "$KNOWN_HOSTS_FILE"
+  say "✓ записал $KNOWN_HOSTS_FILE"
+
+  extra_mounts+=("$key:$CONTAINER_GIT_KEY" "$PWD/$KNOWN_HOSTS_FILE:$CONTAINER_KNOWN_HOSTS")
+  git_ssh_command="ssh -i $CONTAINER_GIT_KEY -o IdentitiesOnly=yes -o UserKnownHostsFile=$CONTAINER_KNOWN_HOSTS"
+}
+
 run_wizard() {
 
-TOTAL_STAGES=10
+TOTAL_STAGES=11
 
 cd "$(dirname "$0")/.."
 
@@ -612,10 +739,25 @@ fi
 pause "Enter, чтобы продолжить"
 
 # ── 8 ─────────────────────────────────────────────────────────────────────
+stage "Git-доступ по SSH"
+say "Чтобы агент мог пушить, в контейнер монтируется один выбранный ssh-ключ и known_hosts,"
+say "оба только на чтение. git ходит этим ключом через GIT_SSH_COMMAND, твой ~/.gitconfig"
+say "остаётся как есть."
+# Collected here and in the next stage; the next stage writes them to $OVERRIDE_FILE.
+extra_mounts=()
+git_ssh_command=""
+if ! confirm "Настроить git push по SSH?"; then
+  say "пропускаю: агент сможет коммитить, но не пушить"
+elif ! configure_git_ssh; then
+  SKIPPED+=("git push по SSH: запусти визард снова, когда разберёшься с предупреждением выше")
+fi
+write_env GIT_SSH_COMMAND "$git_ssh_command"
+pause "Enter, чтобы продолжить"
+
+# ── 9 ─────────────────────────────────────────────────────────────────────
 stage "Дополнительные папки и симлинки"
 say "Конфиги монтируются только на чтение. Абсолютные симлинки в них работают, только если"
 say "их цель смонтирована по тому же пути. Соберу $OVERRIDE_FILE с нужными папками."
-extra_mounts=()
 scan_dirs=("$HOST_OPENCODE_CONFIG")
 if [[ -d "$HOME/.agents" ]] && confirm "Подключить $HOME/.agents (глобальные скиллы)?"; then
   extra_mounts+=("$HOME/.agents:/home/opencode/.agents")
@@ -651,7 +793,7 @@ else
 fi
 pause "Enter, чтобы продолжить"
 
-# ── 9 ─────────────────────────────────────────────────────────────────────
+# ── 10 ────────────────────────────────────────────────────────────────────
 stage "Сервисы на хосте"
 say "Внутри контейнера 127.0.0.1 и localhost означают сам контейнер. Если конфиг opencode"
 say "ходит в локальный прокси или MCP-сервер на хосте, порт надо пробросить на хост."
@@ -684,7 +826,7 @@ fi
 write_env HOST_LOOPBACK_PORTS "$port_list"
 pause "Enter, чтобы продолжить"
 
-# ── 10 ────────────────────────────────────────────────────────────────────
+# ── 11 ────────────────────────────────────────────────────────────────────
 stage "Сборка и запуск"
 server_url="http://localhost:$OPENCODE_PORT"
 say "Соберу образ и подниму контейнер. При первом запуске он скачивает opencode с npm,"
