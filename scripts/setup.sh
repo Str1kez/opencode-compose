@@ -201,7 +201,7 @@ finish() {
 readonly DEFAULT_PORT=4096
 readonly DEFAULT_UPDATE_HOUR=4
 readonly DEFAULT_BASE_IMAGE="debian:trixie-slim"
-readonly DEFAULT_APT_PACKAGES="build-essential python3-dev"
+readonly PYTHON_PROFILE_APT_PACKAGES="build-essential"
 readonly HEALTH_TIMEOUT_SECONDS=900
 readonly OVERRIDE_FILE="docker-compose.override.yml"
 
@@ -430,7 +430,7 @@ if docker image inspect "$DEFAULT_BASE_IMAGE" >/dev/null 2>&1; then
   say "✓ $DEFAULT_BASE_IMAGE уже есть локально"
   write_env BASE_IMAGE "$DEFAULT_BASE_IMAGE"
 elif [[ -n "$local_debian" ]]; then
-  say "Локально есть: $(printf '%s ' $local_debian)"
+  say "Локально есть: ${local_debian//$'\n'/ }"
   local_choice=$(printf '%s\n' "$local_debian" | grep -m1 -- '-slim$' || printf '%s\n' "$local_debian" | head -n1)
   if confirm "Собирать из локального $local_choice?"; then
     write_env BASE_IMAGE "$local_choice"
@@ -443,11 +443,27 @@ else
 fi
 
 printf '\n'
-say "Тулчейн проекта ставится apt-пакетами в образ, например: build-essential python3-dev."
-say "uv и Python агент может поставить сам, они лягут в ~/.local и переживут перезапуски."
+say "Питон-профиль: $PYTHON_PROFILE_APT_PACKAGES (gcc для сборки колёс) и uv прямо в образ."
+say "Системный питон не ставится: uv приносит свой при uv sync. У контейнера свой .venv"
+say "поверх WORKSPACE/.venv, хостовый он не видит и не трогает."
+default_packages=""
+if [[ "$(_existing INSTALL_UV || true)" == "1" ]]; then
+  python_question="Оставить питон-профиль?"
+else
+  python_question="Это питон-проект? Включить питон-профиль?"
+fi
+if confirm "$python_question"; then
+  write_env INSTALL_UV 1
+  default_packages="$PYTHON_PROFILE_APT_PACKAGES"
+  say "Нативным зависимостям нужны dev-библиотеки: допиши их к профилю,"
+  say "например: $PYTHON_PROFILE_APT_PACKAGES libpq-dev libffi-dev. Сам визард их не угадывает."
+else
+  write_env INSTALL_UV 0
+  say "Тулчейн проекта ставится apt-пакетами в образ."
+fi
 while true; do
-  ask EXTRA_APT_PACKAGES "Дополнительные apt-пакеты через пробел [$DEFAULT_APT_PACKAGES], «-» — без них:"
-  EXTRA_APT_PACKAGES="${EXTRA_APT_PACKAGES:-$DEFAULT_APT_PACKAGES}"
+  ask EXTRA_APT_PACKAGES "apt-пакеты через пробел [${default_packages:-без пакетов}], «-» — без них:"
+  EXTRA_APT_PACKAGES="${EXTRA_APT_PACKAGES:-$default_packages}"
   [[ "$EXTRA_APT_PACKAGES" == "-" ]] && EXTRA_APT_PACKAGES=""
   [[ "$EXTRA_APT_PACKAGES" =~ ^[a-z0-9.+:\ -]*$ ]] && break
   warn "имена apt-пакетов: строчные буквы, цифры и . + - :"

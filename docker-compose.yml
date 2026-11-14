@@ -7,6 +7,8 @@ services:
       args:
         BASE_IMAGE: ${BASE_IMAGE:-debian:trixie-slim}
         EXTRA_APT_PACKAGES: ${EXTRA_APT_PACKAGES:-}
+        INSTALL_UV: ${INSTALL_UV:-0}
+        WORKSPACE: ${WORKSPACE}
         OPENCODE_UID: ${OPENCODE_UID:-1000}
         OPENCODE_GID: ${OPENCODE_GID:-1000}
     image: opencode-server:local
@@ -33,6 +35,12 @@ services:
         target: ${WORKSPACE}
         bind:
           create_host_path: false
+      # The host .venv is built for macOS and is useless in Linux; the container gets
+      # its own one at the standard path (ADR 0003). Docker leaves an empty .venv
+      # directory in WORKSPACE on the host as the mount point.
+      - type: volume
+        source: workspace-venv
+        target: ${WORKSPACE}/.venv
       - type: volume
         source: opencode-home
         target: /home/opencode
@@ -61,3 +69,4 @@ services:
 
 volumes:
   opencode-home:
+  workspace-venv:
