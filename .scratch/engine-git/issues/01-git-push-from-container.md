@@ -1,0 +1,19 @@
+# 01: Git push из контейнера выбранным ssh-ключом
+
+**What to build:** Агент внутри контейнера может пушить на remote, а не только коммитить локально. compose монтирует выбранный ssh-ключ и known_hosts только на чтение и прокидывает `GIT_SSH_COMMAND`, так что git ходит именно этим ключом, не трогая read-only `.gitconfig`. Визард автоматизирует настройку: сканирует `~/.ssh`, даёт выбрать ключ, проверяет на нём passphrase и предупреждает, тянет remote из `.git/config` репозитория, делает `ssh-keyscan` хоста с показом fingerprint на сверку и пишет `docker-compose.override.yml`.
+
+Я разделил бы это на механизм и UX, но по решению слито в один слайс.
+
+**Blocked by:** None (can start immediately).
+
+**Status:** ready-for-agent
+
+- [ ] из контейнера `git push` на remote проходит
+- [ ] git использует указанный ключ через `GIT_SSH_COMMAND`; смонтированный read-only `.gitconfig` не трогается, `include`/`includeIf` на отсутствующие в контейнере файлы ничего не ломают
+- [ ] ssh-ключ и known_hosts монтируются только на чтение
+- [ ] визард показывает приватные ключи из `~/.ssh` и даёт выбрать один
+- [ ] на ключе с passphrase визард предупреждает блокирующе (а не строкой в логе) и советует deploy-ключ без passphrase
+- [ ] known_hosts собирается через `ssh-keyscan` по хосту из remote репозитория; fingerprint показан пользователю на сверку
+- [ ] `.env` и сгенерированные файлы с путём к ключу и known_hosts не попадают в git
+- [ ] смоук: поднять харнесс и убедиться, что push из контейнера в тестовый remote проходит
+- [ ] `shellcheck` на `scripts/setup.sh` и `docker/entrypoint.sh` чист
