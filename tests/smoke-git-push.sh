@@ -17,8 +17,18 @@ repo_root=$(cd "$(dirname "$0")/.." && pwd -P)
 work=$(cd "$(mktemp -d "${TMPDIR:-/tmp}/smoke-git-push.XXXXXX")" && pwd -P)
 
 compose() {
-  docker compose -p "$project" --env-file "$work/.env" \
+  command docker compose -p "$project" --env-file "$work/.env" \
     -f "$repo_root/docker-compose.yml" -f "$work/scratch.yml" -f "$work/override.yml" "$@"
+}
+
+# The wizard's own docker compose calls (check_git_push_from_container) go to this project.
+docker() {
+  if [[ "${1:-}" == compose ]]; then
+    shift
+    compose "$@"
+  else
+    command docker "$@"
+  fi
 }
 
 cleanup() {
@@ -81,27 +91,30 @@ cat > "$work/gitconfig" <<EOF
 	sshCommand = false
 EOF
 
-# Wizard step, scripted: pick the key with a passphrase (2), refuse it (n), pick the
-# deploy key (1), confirm the fingerprint (y).
+# Wizard step, scripted: pick the key with a passphrase (2, the wizard loops back), a path
+# with a forbidden character (rejected), the deploy key (1), confirm the fingerprint (y).
 (
   cd "$work"
   # shellcheck disable=SC2034  # read by configure_git_ssh and write_env from wizard-lib.sh
   HOME="$work/home" WORKSPACE="$ws" ENV_FILE="$work/wizard.env"
   extra_mounts=()
   git_ssh_command=""
-  configure_git_ssh > "$work/wizard.log" 2>&1 <<< $'2\nn\n1\ny'
+  configure_git_ssh > "$work/wizard.log" 2>&1 <<< $'2\nbad:path\n1\ny'
   printf '%s\n' "$git_ssh_command" > "$work/git-ssh-command"
   printf '%s\n' "${extra_mounts[@]}" > "$work/mounts"
 ) || { cat "$work/wizard.log"; fail "configure_git_ssh failed"; }
 grep -q 'passphrase' "$work/wizard.log" || fail "no passphrase warning for id_locked"
+grep -q 'нельзя' "$work/wizard.log" || fail "key path with a colon was not rejected"
+if grep -q 'Всё равно' "$work/wizard.log"; then fail "wizard still offers to take a passphrase key"; fi
 grep -q 'SHA256:' "$work/wizard.log" || fail "host key fingerprint was not shown"
 [[ -s "$work/.git-ssh/known_hosts" ]] || fail "known_hosts was not written"
-pass "wizard step: passphrase warning, fingerprint shown, known_hosts written"
+pass "wizard step: passphrase key loops back, bad path rejected, fingerprint shown, known_hosts written"
 
 cat > "$work/.env" <<EOF
 WORKSPACE='$ws'
 OPENCODE_SERVER_PASSWORD='smoke-password-$id'
 OPENCODE_PORT='41$id'
+VENV_VOLUME='$project-venv'
 HOST_OPENCODE_CONFIG='$work/opencode-config'
 HOST_GITCONFIG='$work/gitconfig'
 GIT_SSH_COMMAND='$(cat "$work/git-ssh-command")'
@@ -115,10 +128,9 @@ networks:
     name: $network
     external: true
 EOF
-{
-  printf 'services:\n  opencode:\n    volumes:\n'
-  while IFS= read -r mount; do printf '      - "%s:ro"\n' "$mount"; done < "$work/mounts"
-} > "$work/override.yml"
+mounts=()
+while IFS= read -r mount; do mounts+=("$mount"); done < "$work/mounts"
+write_override_file "$work/override.yml" "${mounts[@]}"
 
 compose up -d --build --wait --wait-timeout "$HEALTH_TIMEOUT_SECONDS"
 pass "harness is up and healthy"
@@ -130,6 +142,12 @@ if compose exec -T opencode sh -c "echo x >> $CONTAINER_GIT_KEY" 2>/dev/null; th
   fail "ssh key is writable in the container"
 fi
 pass "key and known_hosts are read-only"
+
+# shellcheck disable=SC2034  # read by check_git_push_from_container from wizard-lib.sh
+WORKSPACE="$ws"
+check_git_push_from_container > "$work/check.log" 2>&1
+grep -q '✓' "$work/check.log" || { cat "$work/check.log"; fail "post-setup push check did not pass"; }
+pass "post-setup dry-run push from the container passed"
 
 compose exec -T opencode git push origin main
 local_head=$(git -C "$ws" rev-parse HEAD)

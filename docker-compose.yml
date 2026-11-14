@@ -40,8 +40,8 @@ services:
         bind:
           create_host_path: false
       # The host .venv is built for macOS and is useless in Linux; the container gets
-      # its own one at the standard path (ADR 0003). Docker leaves an empty .venv
-      # directory in WORKSPACE on the host as the mount point.
+      # its own one at the standard path (ADR 0003). The mount point is an empty .venv
+      # directory in WORKSPACE on the host, created by the wizard (or by hand).
       - type: volume
         source: workspace-venv
         target: ${WORKSPACE}/.venv
@@ -73,4 +73,7 @@ services:
 
 volumes:
   opencode-home:
+  # Named per repository (the wizard derives VENV_VOLUME from WORKSPACE), so switching
+  # WORKSPACE doesn't reuse another repository's venv.
   workspace-venv:
+    name: ${VENV_VOLUME:-opencode-venv}
