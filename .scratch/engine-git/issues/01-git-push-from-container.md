@@ -6,7 +6,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 **Модель реализации:** sonnet, high — граница хост/контейнер (ключи, монтирования, ssh), контракты не новые
 
@@ -19,3 +19,7 @@
 - [x] `.env` и сгенерированные файлы с путём к ключу и known_hosts не попадают в git
 - [x] смоук: поднять харнесс и убедиться, что push из контейнера в тестовый remote проходит
 - [x] `shellcheck` на `scripts/setup.sh` и `docker/entrypoint.sh` чист
+
+## Comments
+
+- 2026-11-14: Реализовано в `task-engine-git` (f055d55, фиксы ревью 17a98de). Смоук `tests/smoke-git-push.sh` проходит: push из контейнера в одноразовый sshd, dry-run push после запуска, отказ от пути `bad:path`. shellcheck чист.

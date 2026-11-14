@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately, параллельно 01 и 02).
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 **Модель реализации:** sonnet, medium — volume поверх `.venv` и шаг визарда по готовым швам (решение в ADR 0003)
 
@@ -18,3 +18,7 @@
 - [x] дефолт `EXTRA_APT_PACKAGES` больше не содержит `python3-dev`
 - [x] смоук: на тестовом питон-проекте в контейнере `uv sync` проходит и `.venv/bin/python -c` отрабатывает
 - [x] `shellcheck` на `scripts/setup.sh` чист
+
+## Comments
+
+- 2026-11-14: Реализовано в `task-engine-git` (d9709fc, фиксы ревью 17a98de). Смоук `tests/smoke-python-venv.sh` проходит: `uv sync` в контейнере, хостовый `.venv` не тронут, volume свой на каждый репозиторий (`VENV_VOLUME`). Образ uv скачивается и при `INSTALL_UV=0` (~20 МБ), это принято сознательно.

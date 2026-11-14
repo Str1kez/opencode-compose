@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
 **Модель реализации:** sonnet, medium — детекция движка и проверка mount в визарде, обычная логика
 
@@ -15,3 +15,7 @@
 - [x] compose не содержит движок-специфичных веток
 - [ ] смоук: харнесс поднимается на colima, сервер отвечает на healthcheck
 - [x] `shellcheck` на `scripts/setup.sh` чист
+
+## Comments
+
+- 2026-11-14: Код в `task-engine-git` (8e4f372, фиксы ревью 17a98de). На машине разработки есть только OrbStack: colima проверена на заглушках `docker`/`colima` и в `tests/wizard-functions.sh`, Docker Desktop не проверялся. Осталось вживую: смоук на colima (в том числе WORKSPACE вне `$HOME`, путь с пробелами, профиль colima не default) и прогон визарда на Docker Desktop.
