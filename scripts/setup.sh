@@ -204,6 +204,8 @@ readonly DEFAULT_BASE_IMAGE="debian:trixie-slim"
 readonly PYTHON_PROFILE_APT_PACKAGES="build-essential"
 readonly HEALTH_TIMEOUT_SECONDS=900
 readonly OVERRIDE_FILE="docker-compose.override.yml"
+readonly APT_CONFIG_DIR="docker/apt"
+readonly DEFAULT_UV_REGISTRY="ghcr.io"
 readonly KNOWN_HOSTS_FILE=".git-ssh/known_hosts"
 readonly CONTAINER_GIT_KEY="/run/git-ssh/id"
 readonly CONTAINER_KNOWN_HOSTS="/run/git-ssh/known_hosts"
@@ -837,6 +839,29 @@ venv_volume_name() {
   printf 'opencode-venv-%s-%s' "$slug" "$sum"
 }
 
+# Replaces the corporate apt setup in $APT_CONFIG_DIR with the files from SRC (a host
+# folder): *.sources, *.list, *.conf, *.crt. With no SRC only clears it. The Dockerfile
+# applies whatever lies there before the first apt-get. Fails when SRC has none of them.
+install_apt_config() {
+  local src="${1:-}" file copied=0
+  if [[ -n "$src" && ! -d "$src" ]]; then
+    warn "папки $src нет"
+    return 1
+  fi
+  find "$APT_CONFIG_DIR" -mindepth 1 -maxdepth 1 ! -name README.md -exec rm -rf {} +
+  [[ -n "$src" ]] || return 0
+  for file in "$src"/*.sources "$src"/*.list "$src"/*.conf "$src"/*.crt; do
+    [[ -f "$file" ]] || continue
+    cp "$file" "$APT_CONFIG_DIR/"
+    copied=$((copied + 1))
+  done
+  if (( copied == 0 )); then
+    warn "в $src нет ни *.sources, ни *.list, ни *.conf, ни *.crt"
+    return 1
+  fi
+  say "✓ скопировал в $APT_CONFIG_DIR файлов: $copied"
+}
+
 run_wizard() {
 
 TOTAL_STAGES=11
@@ -1006,6 +1031,29 @@ else
 fi
 
 printf '\n'
+say "В корпоративной сети deb.debian.org бывает закрыт, и пакеты идут через внутреннее"
+say "зеркало. Тогда укажи папку с его apt-настройками: *.sources или *.list, *.conf"
+say "(прокси, логин), *.crt. Визард скопирует их в $APT_CONFIG_DIR, подробности там в README.md."
+while true; do
+  ask APT_CONFIG_SOURCE "Папка с apt-настройками зеркала, Enter — стандартный Debian, «-» — убрать:"
+  case "${APT_CONFIG_SOURCE:-}" in
+    "")
+      break
+      ;;
+    -)
+      APT_CONFIG_SOURCE=""
+      install_apt_config ""
+      break
+      ;;
+    *)
+      APT_CONFIG_SOURCE=$(expand_path "$APT_CONFIG_SOURCE")
+      install_apt_config "$APT_CONFIG_SOURCE" && break
+      ;;
+  esac
+done
+write_env APT_CONFIG_SOURCE "$APT_CONFIG_SOURCE"
+
+printf '\n'
 say "Питон-профиль: $PYTHON_PROFILE_APT_PACKAGES (gcc для сборки колёс) и uv прямо в образ."
 say "Системный питон не ставится: uv приносит свой при uv sync. У контейнера свой .venv"
 say "поверх WORKSPACE/.venv, хостовый он не видит и не трогает."
@@ -1019,6 +1067,13 @@ fi
 if confirm_default "$python_saved" "$python_question"; then
   write_env INSTALL_UV 1
   default_packages="$PYTHON_PROFILE_APT_PACKAGES"
+  while true; do
+    ask UV_REGISTRY "Registry для образа uv [$DEFAULT_UV_REGISTRY], зеркало, если ghcr.io закрыт:"
+    UV_REGISTRY="${UV_REGISTRY:-$DEFAULT_UV_REGISTRY}"
+    [[ "$UV_REGISTRY" =~ ^[A-Za-z0-9][A-Za-z0-9.:/_-]*$ ]] && break
+    warn "registry: хост и путь, например nexus.example.corp:8443"
+  done
+  write_env UV_REGISTRY "$UV_REGISTRY"
   say "Нативным зависимостям нужны dev-библиотеки: допиши их к профилю,"
   say "например: $PYTHON_PROFILE_APT_PACKAGES libpq-dev libffi-dev. Сам визард их не угадывает."
 else

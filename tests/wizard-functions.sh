@@ -182,3 +182,21 @@ pass "helpers: sh_quote, unverifiable mount, per-path venv volume"
     || fail "workspace outside HOME: got '${COLIMA_START[*]}'"
 )
 pass "colima start: no overlapping mounts, HOME always kept"
+
+# Corporate apt setup: only apt files are copied, the previous set is replaced, README stays.
+(
+  cd "$work" && mkdir -p apt-repo/docker/apt apt-src && cd apt-repo
+  echo keep > docker/apt/README.md
+  echo stale > docker/apt/old.sources
+  printf 'Types: deb\n' > ../apt-src/corp.sources
+  echo 'Acquire::http::Proxy "http://proxy:3128";' > ../apt-src/proxy.conf
+  echo cert > ../apt-src/corp.crt
+  echo junk > ../apt-src/notes.txt
+  install_apt_config "$work/apt-src" > /dev/null || fail "apt config install failed"
+  files=$(find docker/apt -type f -exec basename {} \; | LC_ALL=C sort | tr '\n' ' ')
+  [[ "$files" == "README.md corp.crt corp.sources proxy.conf " ]] || fail "apt config: unexpected files $files"
+  ! install_apt_config "$work/apt-repo/no-such-dir" > /dev/null 2>&1 || fail "missing folder accepted"
+  install_apt_config "" > /dev/null
+  [[ "$(find docker/apt -type f -exec basename {} \;)" == "README.md" ]] || fail "clearing apt config left files behind"
+)
+pass "apt config: apt files copied, old set replaced, README kept"

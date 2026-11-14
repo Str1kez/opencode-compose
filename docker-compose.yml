@@ -7,6 +7,7 @@ services:
       dockerfile: docker/Dockerfile
       args:
         BASE_IMAGE: ${BASE_IMAGE:-debian:trixie-slim}
+        UV_REGISTRY: ${UV_REGISTRY:-ghcr.io}
         EXTRA_APT_PACKAGES: ${EXTRA_APT_PACKAGES:-}
         INSTALL_UV: ${INSTALL_UV:-0}
         WORKSPACE: ${WORKSPACE}
