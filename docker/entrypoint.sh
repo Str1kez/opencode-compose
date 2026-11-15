@@ -52,8 +52,8 @@ trap 'stop_children; exit "$EXIT_SIGTERM"' TERM INT
 # servers at 127.0.0.1:<port> on the host. Inside the container that address is the
 # container itself; forward each listed port to the same port on the host.
 start_host_loopback_forwards() {
-    local port
-    for port in ${HOST_LOOPBACK_PORTS//,/ }; do
+    local port ports="${HOST_LOOPBACK_PORTS:-}"
+    for port in ${ports//,/ }; do
         if ! [[ "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535 || port == PORT)); then
             echo "HOST_LOOPBACK_PORTS: invalid port '$port' (1-65535, not $PORT)" >&2
             exit 1
