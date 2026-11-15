@@ -13,9 +13,10 @@
 - [x] визард не стартует и не перезапускает colima без явного подтверждения пользователя
 - [x] при добавлении mount визард предупреждает, что `colima stop && start` оборвёт остальные контейнеры пользователя
 - [x] compose не содержит движок-специфичных веток
-- [ ] смоук: харнесс поднимается на colima, сервер отвечает на healthcheck
+- [x] смоук: харнесс поднимается на colima, сервер отвечает на healthcheck
 - [x] `shellcheck` на `scripts/setup.sh` чист
 
 ## Comments
 
 - 2026-11-14: Код в `task-engine-git` (8e4f372, фиксы ревью 17a98de). На машине разработки есть только OrbStack: colima проверена на заглушках `docker`/`colima` и в `tests/wizard-functions.sh`, Docker Desktop не проверялся. Осталось вживую: смоук на colima (в том числе WORKSPACE вне `$HOME`, путь с пробелами, профиль colima не default) и прогон визарда на Docker Desktop.
+- 2026-11-15: Живой прогон визарда на colima 0.10.3 (lima 2.3.0), WORKSPACE внутри `$HOME`: happy path прошёл, сервер поднялся. По пути нашлись и исправлены два бага: overlapping mounts в `colima start` (6cf29d2) и двойное квотирование пути в проверке mount через `colima ssh` (dc4232f). Не проверены: WORKSPACE вне `$HOME`, путь с пробелами, профиль colima не default, Docker Desktop.
