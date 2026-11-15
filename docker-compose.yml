@@ -10,12 +10,23 @@ services:
         UV_REGISTRY: ${UV_REGISTRY:-ghcr.io}
         EXTRA_APT_PACKAGES: ${EXTRA_APT_PACKAGES:-}
         INSTALL_UV: ${INSTALL_UV:-0}
-        WORKSPACE: ${WORKSPACE}
+        WORKSPACE: ${WORKSPACE:?set WORKSPACE in .env}
         OPENCODE_UID: ${OPENCODE_UID:-1000}
         OPENCODE_GID: ${OPENCODE_GID:-1000}
     image: opencode-server:local
     init: true
     restart: unless-stopped
+    # The server runs as a non-root user from the start and needs no capability:
+    # it listens on 4096, socat forwards ports above 1024, nothing calls chown or setuid.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Threads count as pids; the limit leaves room for builds and test runs of the agent.
+    pids_limit: 1024
+    # Longer than STOP_TIMEOUT in docker/entrypoint.sh (10s), or Docker SIGKILLs the
+    # entrypoint before it exits with 143.
+    stop_grace_period: 30s
     ports:
       - "127.0.0.1:${OPENCODE_PORT:-4096}:4096"
     environment:
@@ -37,8 +48,8 @@ services:
     working_dir: ${WORKSPACE:?set WORKSPACE in .env}
     volumes:
       - type: bind
-        source: ${WORKSPACE}
-        target: ${WORKSPACE}
+        source: ${WORKSPACE:?set WORKSPACE in .env}
+        target: ${WORKSPACE:?set WORKSPACE in .env}
         bind:
           create_host_path: false
       # The host .venv is built for macOS and is useless in Linux; the container gets
@@ -46,7 +57,7 @@ services:
       # directory in WORKSPACE on the host, created by the wizard (or by hand).
       - type: volume
         source: workspace-venv
-        target: ${WORKSPACE}/.venv
+        target: ${WORKSPACE:?set WORKSPACE in .env}/.venv
       - type: volume
         source: opencode-home
         target: /home/opencode
@@ -70,7 +81,8 @@ services:
       test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:4096/"]
       interval: 30s
       timeout: 5s
-      start_period: 60s
+      # The first start downloads opencode, which can take minutes on a slow corporate network.
+      start_period: 300s
       retries: 3
 
 volumes:
