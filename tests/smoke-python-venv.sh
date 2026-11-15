@@ -4,9 +4,10 @@
 # runs, the host .venv stays untouched, and the .venv lives in the per-repository volume.
 #
 # Usage: tests/smoke-python-venv.sh [NN] [UID]
-# Uses compose project oc-tNN, image opencode-server:tNN and volume oc-tNN-venv, so it never
-# touches the real `opencode` project or its volumes. Removes its own containers and volumes
-# on exit. UID (default 1000) is the container user, to check ownership on Linux hosts.
+# Uses compose project oc-tNN, image opencode-server:tNN and volumes oc-tNN-venv and
+# oc-tNN-home, so it never touches a real project, its volumes or the shared home volume.
+# Removes its own containers and volumes on exit. UID (default 1000) is the container user,
+# to check ownership on Linux hosts.
 set -euo pipefail
 
 id="${1:-04}"
@@ -42,6 +43,7 @@ HOST_GITCONFIG=$work/gitconfig
 EXTRA_APT_PACKAGES=build-essential
 INSTALL_UV=1
 VENV_VOLUME=$venv_volume
+HOME_VOLUME=$project-home
 OPENCODE_UID=$uid
 OPENCODE_GID=$uid
 EOF

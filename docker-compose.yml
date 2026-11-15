@@ -1,3 +1,5 @@
+# The default for setups without the wizard. The wizard writes COMPOSE_PROJECT_NAME to .env,
+# one per repository, so two repositories run side by side (ADR 0002); it overrides this.
 name: opencode
 
 services:
@@ -13,7 +15,8 @@ services:
         WORKSPACE: ${WORKSPACE:?set WORKSPACE in .env}
         OPENCODE_UID: ${OPENCODE_UID:-1000}
         OPENCODE_GID: ${OPENCODE_GID:-1000}
-    image: opencode-server:local
+    # Per project: repositories with different toolchains don't retag each other's image.
+    image: opencode-server:${COMPOSE_PROJECT_NAME}
     init: true
     restart: unless-stopped
     # The server runs as a non-root user from the start and needs no capability:
@@ -86,7 +89,10 @@ services:
       retries: 3
 
 volumes:
+  # Shared by all repositories: one opencode login and one downloaded binary. The default is
+  # the name compose gave it when the project was always `opencode`, so that data stays.
   opencode-home:
+    name: ${HOME_VOLUME:-opencode_opencode-home}
   # Named per repository (the wizard derives VENV_VOLUME from WORKSPACE), so switching
   # WORKSPACE doesn't reuse another repository's venv.
   workspace-venv:
