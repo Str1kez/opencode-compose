@@ -4,7 +4,7 @@
 
 - `*.sources` или `*.list` заменяют стандартные источники Debian целиком;
 - `*.conf` ложатся в `/etc/apt/apt.conf.d/`: прокси, логин к зеркалу, `Acquire::https::CAInfo`;
-- `*.crt` становятся доверенными сертификатами в образе.
+- `*.crt` становятся доверенными сертификатами в образе: сборка явно запускает `update-ca-certificates`, в том числе когда `ca-certificates` уже есть в базовом образе.
 
 Пример `corp.sources` для trixie:
 
@@ -20,7 +20,7 @@ Suites: trixie-security
 Components: main
 ```
 
-Если зеркало на https с корпоративным сертификатом, положи рядом `corp-ca.crt` и `corp-ca.conf` со строкой `Acquire::https::CAInfo "/usr/local/share/ca-certificates/corp-ca.crt";`: при первом `apt-get update` пакета `ca-certificates` в образе ещё нет.
+Если зеркало на https с корпоративным сертификатом, положи рядом `corp-ca.crt` и `corp-ca.conf` со строкой `Acquire::https::CAInfo "/usr/local/share/ca-certificates/corp-ca.crt";`: в debian slim при первом `apt-get update` пакета `ca-certificates` ещё нет, и сертификат туда не доедет, поэтому `CAInfo` указывает прямо на файл.
 
 `*.conf` действуют только во время сборки и в образ не попадают: логин и прокси не должны жить в слое. Поэтому логин клади в `*.conf`, а не в адрес внутри `*.sources`: источники и сертификаты в образе остаются. Из-за этого `apt-get install` руками в запущенном контейнере до зеркала не достучится. Нужные пакеты добавляй через `EXTRA_APT_PACKAGES` в `.env` и пересобирай образ.
 
