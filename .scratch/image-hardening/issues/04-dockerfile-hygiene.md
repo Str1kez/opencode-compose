@@ -17,15 +17,17 @@
 
 **Модель реализации:** sonnet, medium — механика сборки, но pipefail и порядок apt-шагов легко сломать молча
 
-- [ ] сборка с тестовым `*.crt` на базовом образе, где `ca-certificates` уже стоит: сертификат в доверенных
-- [ ] сборка с тестовым `*.sources` под pipefail: источники подменены
-- [ ] `*.conf` по-прежнему не попадают в слои образа
+- [x] сборка с тестовым `*.crt` на базовом образе, где `ca-certificates` уже стоит: сертификат в доверенных
+- [x] сборка с тестовым `*.sources` под pipefail: источники подменены
+- [x] `*.conf` по-прежнему не попадают в слои образа
 - [x] `bash`, `tar`, `tzdata` убраны из списка, `make` на месте
 - [x] выбор между cache mount и чисткой списков записан комментарием
-- [ ] занятый UID даёт понятную ошибку сборки
-- [ ] оба смоука зелёные
+- [x] занятый UID даёт понятную ошибку сборки
+- [x] оба смоука зелёные
 - [x] запись в CHANGELOG
 
 ## Comments
 
 - Не отмечено (нужен docker build, демона нет по решению пользователя): сборка с `*.crt` на базе с `ca-certificates`, сборка с `*.sources` под pipefail, `*.conf` вне слоёв, ошибка занятого UID, оба смоука. Логика glob/pipefail проверена локально в bash на временных каталогах (пустой `docker/apt` и с `*.sources`, `*.list`, `*.conf`, `*.crt`).
+- 2026-11-15, OrbStack 29.8.2, ветка `task-image-hardening` после мёрджа всех тикетов: `tests/smoke-git-push.sh` и `tests/smoke-python-venv.sh` зелёные.
+- Сборка из временной копии `docker/` на `buildpack-deps:trixie-curl` с `smoke-ca.crt`, `smoke.sources`, `smoke-secret.conf`: CA в `/etc/ssl/certs/ca-certificates.crt`, в `sources.list.d` только `smoke.sources`, `zz-build-*` в образе нет, `smoke-secret` нет в `docker history`. `OPENCODE_UID=0` валит сборку с `UID 0 is already taken by 'root'`. hadolint: остался только DL3066 (info), DL3046 починен через `useradd -l`.

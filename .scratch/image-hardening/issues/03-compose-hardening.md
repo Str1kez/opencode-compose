@@ -11,9 +11,11 @@
 - [ ] `cap_drop: ALL`, `no-new-privileges`, `pids_limit`; сервер, socat-проброс портов и апдейтер работают
 - [ ] `start_period` и `stop_grace_period` подняты, `docker compose down` останавливает контейнер с кодом 143, а не по SIGKILL
 - [x] пустой WORKSPACE даёт внятную ошибку compose во всех подстановках
-- [ ] оба смоука зелёные
+- [x] оба смоука зелёные
 - [x] запись в CHANGELOG
 
 ## Comments
 
 - Пункты 1, 2 (код 143) и 4 не отмечены: нет Docker daemon, рантайм и смоуки не запускались. Изменения в compose (`cap_drop`, `no-new-privileges`, `pids_limit`, `start_period: 300s`, `stop_grace_period: 30s`) проверены только через `docker compose config`; по коду ни одной capability рантайму не нужно (USER opencode с первой инструкции, порты > 1024, нет chown/setuid).
+- 2026-11-15, OrbStack 29.8.2, ветка `task-image-hardening` после мёрджа всех тикетов: `tests/smoke-git-push.sh` и `tests/smoke-python-venv.sh` зелёные.
+- Смоук `git push` поднял контейнер под `cap_drop: ALL`, `no-new-privileges` и `pids_limit`: апдейтер поставил opencode, сервер стал healthy. Проброс socat и код выхода 143 при `down` вживую не проверены.
