@@ -11,17 +11,6 @@ FROM ${BASE_IMAGE}
 # *.sources and *.list replace Debian's default sources, *.conf go to apt.conf.d (proxy,
 # auth, CAInfo), *.crt become trusted CAs (the ca-certificates install below picks
 # them up, so curl, git and the opencode installer trust them too).
-COPY docker/apt/ /tmp/apt/
-RUN set -e; \
-    if find /tmp/apt -maxdepth 1 \( -name '*.sources' -o -name '*.list' \) | grep -q .; then \
-        rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*; \
-        find /tmp/apt -maxdepth 1 \( -name '*.sources' -o -name '*.list' \) -exec cp {} /etc/apt/sources.list.d/ \; ; \
-    fi; \
-    find /tmp/apt -maxdepth 1 -name '*.conf' -exec cp {} /etc/apt/apt.conf.d/ \; ; \
-    mkdir -p /usr/local/share/ca-certificates; \
-    find /tmp/apt -maxdepth 1 -name '*.crt' -exec cp {} /usr/local/share/ca-certificates/ \; ; \
-    rm -rf /tmp/apt
-
 # ripgrep: opencode's search tools, preinstalled so it doesn't download its own copy.
 # socat: forwards HOST_LOOPBACK_PORTS from the container's 127.0.0.1 to the host.
 # make: most projects run their tasks through a Makefile, and the agent calls it too.
@@ -29,8 +18,22 @@ RUN set -e; \
 # python project. No system python or python3-dev: `uv sync` brings a standalone
 # python with headers.
 ARG EXTRA_APT_PACKAGES=""
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+# One RUN on purpose: docker/apt comes in as a bind mount and the *.conf copies are
+# removed before the layer is committed, so a mirror login or proxy never lands in the
+# image. Sources and CAs stay; they hold no secrets.
+RUN --mount=type=bind,source=docker/apt,target=/tmp/apt \
+    set -e; \
+    if find /tmp/apt -maxdepth 1 \( -name '*.sources' -o -name '*.list' \) | grep -q .; then \
+        rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*; \
+        find /tmp/apt -maxdepth 1 \( -name '*.sources' -o -name '*.list' \) -exec cp {} /etc/apt/sources.list.d/ \; ; \
+    fi; \
+    for conf in /tmp/apt/*.conf; do \
+        if [ -e "$conf" ]; then cp "$conf" "/etc/apt/apt.conf.d/zz-build-${conf##*/}"; fi; \
+    done; \
+    mkdir -p /usr/local/share/ca-certificates; \
+    find /tmp/apt -maxdepth 1 -name '*.crt' -exec cp {} /usr/local/share/ca-certificates/ \; ; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         bash \
         ca-certificates \
         curl \
@@ -42,8 +45,9 @@ RUN apt-get update \
         socat \
         tar \
         tzdata \
-        ${EXTRA_APT_PACKAGES} \
-    && rm -rf /var/lib/apt/lists/*
+        ${EXTRA_APT_PACKAGES}; \
+    rm -f /etc/apt/apt.conf.d/zz-build-*; \
+    rm -rf /var/lib/apt/lists/*
 
 ARG OPENCODE_UID=1000
 ARG OPENCODE_GID=1000

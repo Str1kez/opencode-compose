@@ -1,0 +1,4 @@
+# The build context is docker/ only: .env, .git and the rest never reach the daemon.
+*
+!docker
+!docker/**

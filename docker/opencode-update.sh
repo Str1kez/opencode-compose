@@ -10,9 +10,18 @@ readonly LATEST_URL="https://opencode.ai/update/api/latest/cli/npm"
 readonly INSTALL_URL="https://opencode.ai/v2/install"
 readonly BIN_DIR="$HOME/.opencode/bin"
 readonly BIN="$BIN_DIR/opencode"
-readonly UPDATE_HOUR="${OPENCODE_UPDATE_HOUR:-4}"
+readonly UPDATE_HOUR_RAW="${OPENCODE_UPDATE_HOUR:-4}"
 readonly SECONDS_PER_DAY=86400
 readonly EXIT_UP_TO_DATE=3
+
+# Digits only, 0-23. Parsed with 10#: a bare `09` is an invalid octal number in bash arithmetic.
+validate_update_hour() {
+    if ! [[ "$UPDATE_HOUR_RAW" =~ ^[0-9]{1,2}$ ]] || ((10#$UPDATE_HOUR_RAW > 23)); then
+        echo "OPENCODE_UPDATE_HOUR: invalid value '$UPDATE_HOUR_RAW' (allowed: an hour 0-23)" >&2
+        exit 2
+    fi
+    UPDATE_HOUR=$((10#$UPDATE_HOUR_RAW))
+}
 
 log() {
     echo "[opencode-update] $(date '+%Y-%m-%d %H:%M:%S') $*" >&2
@@ -91,6 +100,11 @@ cmd_loop() {
         fi
     done
 }
+
+UPDATE_HOUR=4
+case "${1:-}" in
+    install | check | loop) validate_update_hour ;;
+esac
 
 case "${1:-}" in
     install) cmd_install ;;
