@@ -221,6 +221,22 @@ mkdir -p "$work/home-volume"
   [[ "$(_existing HOME_VOLUME)" == "$SHARED_HOME_VOLUME" ]] || fail "explicit shared home was replaced"
   save_workspace_identity "/work/a-b/c" "/work/a/b-c" > /dev/null
   [[ "$(_existing HOME_VOLUME)" == "$SHARED_HOME_VOLUME" ]] || fail "explicit shared home lost on workspace change"
+
+  printf "WORKSPACE='/work/legacy'\n" > "$ENV_FILE"
+  out=$(save_workspace_identity "/work/legacy" "/work/legacy")
+  [[ "$(_existing HOME_VOLUME)" == "$(home_volume_name "/work/legacy")" ]] \
+    || fail "legacy setup with unset HOME_VOLUME was not moved to a derived home"
+  [[ "$out" == *"$SHARED_HOME_VOLUME"* && "$out" == *"docker volume rm"* ]] \
+    || fail "migration note missing the old shared volume hint: $out"
+
+  write_env HOME_VOLUME "my-home" > /dev/null
+  out=$(save_workspace_identity "/work/legacy" "/work/legacy")
+  [[ "$(_existing HOME_VOLUME)" == "$(home_volume_name "/work/legacy")" ]] \
+    || fail "hand-picked HOME_VOLUME was not replaced"
+  [[ "$out" == *my-home* ]] || fail "replacing a hand-picked HOME_VOLUME was silent: $out"
+
+  out=$(save_workspace_identity "/work/legacy" "/work/legacy")
+  [[ "$out" != *"$SHARED_HOME_VOLUME"* && "$out" != *my-home* ]] || fail "unchanged derived home printed a note: $out"
 )
 pass "home volume: per repository, explicit shared home kept, foreign derived name replaced"
 

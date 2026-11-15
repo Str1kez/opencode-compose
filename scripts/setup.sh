@@ -879,7 +879,7 @@ workspace_port() {
 # project names were derived runs as project `opencode`: renaming it would leave that
 # container running beside the new one on the same port.
 save_workspace_identity() {
-  local workspace="$1" saved_workspace="$2" project home_before
+  local workspace="$1" saved_workspace="$2" project home_before home_volume
   home_before=$(_existing HOME_VOLUME || true)
   if [[ "$workspace" == "$saved_workspace" ]]; then
     project=$(_existing COMPOSE_PROJECT_NAME || true)
@@ -893,10 +893,14 @@ save_workspace_identity() {
     write_env HOME_VOLUME "$SHARED_HOME_VOLUME"
     return 0
   fi
-  write_env HOME_VOLUME "$(home_volume_name "$workspace")"
+  home_volume=$(home_volume_name "$workspace")
+  write_env HOME_VOLUME "$home_volume"
   if [[ -z "$home_before" && -n "$saved_workspace" ]]; then
     note "Домашняя папка контейнера теперь своя у каждого репозитория: логин в провайдерах и загрузка opencode повторятся."
     note "Чтобы оставить общую, пропиши в .env HOME_VOLUME=$SHARED_HOME_VOLUME. Риск: агент в одном репозитории сможет подложить код, который запустится в другом."
+    note "В старой общей $SHARED_HOME_VOLUME могла остаться подложенная закладка и токены всех провайдеров: когда все репозитории перейдут, считай её недоверенной и удали (docker volume rm $SHARED_HOME_VOLUME)."
+  elif [[ -n "$home_before" && "$home_before" != "$home_volume" ]]; then
+    note "HOME_VOLUME=$home_before заменён на $home_volume: логин и бинарь из старого volume больше не используются. Общую домашку можно оставить только именем $SHARED_HOME_VOLUME."
   fi
 }
 
