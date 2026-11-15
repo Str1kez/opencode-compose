@@ -24,6 +24,7 @@ RUN set -e; \
 
 # ripgrep: opencode's search tools, preinstalled so it doesn't download its own copy.
 # socat: forwards HOST_LOOPBACK_PORTS from the container's 127.0.0.1 to the host.
+# make: most projects run their tasks through a Makefile, and the agent calls it too.
 # EXTRA_APT_PACKAGES: the project's toolchain, e.g. "build-essential libpq-dev" for a
 # python project. No system python or python3-dev: `uv sync` brings a standalone
 # python with headers.
@@ -34,6 +35,7 @@ RUN apt-get update \
         ca-certificates \
         curl \
         git \
+        make \
         openssh-client \
         procps \
         ripgrep \
