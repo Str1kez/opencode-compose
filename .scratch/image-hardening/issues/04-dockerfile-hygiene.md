@@ -13,7 +13,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 **Модель реализации:** sonnet, medium — механика сборки, но pipefail и порядок apt-шагов легко сломать молча
 

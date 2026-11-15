@@ -6,7 +6,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 **Модель реализации:** sonnet, medium — правка одного скрипта, но меняется старт контейнера
 
