@@ -7,13 +7,22 @@ FROM ${UV_REGISTRY}/astral-sh/uv:0.13.8@sha256:5cc1805e2426484abca4ad46ea783bab2
 
 FROM ${BASE_IMAGE}
 
+LABEL org.opencontainers.image.title="opencode-compose" \
+      org.opencontainers.image.description="opencode v2 server in a container with a non-root user" \
+      org.opencontainers.image.source="https://github.com/Str1kez/opencode-compose"
+
+# pipefail applies to every RUN below. It is introduced together with the glob checks in
+# the apt step: `find | grep -q` would break under it (grep exits early, find gets SIGPIPE).
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # docker/apt/ holds an optional corporate apt setup, applied before the first apt-get:
 # *.sources and *.list replace Debian's default sources, *.conf go to apt.conf.d (proxy,
-# auth, CAInfo), *.crt become trusted CAs (the ca-certificates install below picks
-# them up, so curl, git and the opencode installer trust them too).
+# auth, CAInfo), *.crt become trusted CAs (registered with an explicit
+# update-ca-certificates, so curl, git and the opencode installer trust them too).
 # ripgrep: opencode's search tools, preinstalled so it doesn't download its own copy.
 # socat: forwards HOST_LOOPBACK_PORTS from the container's 127.0.0.1 to the host.
 # make: most projects run their tasks through a Makefile, and the agent calls it too.
+# bash, tar and tzdata are already in debian slim, so they are not listed.
 # EXTRA_APT_PACKAGES: the project's toolchain, e.g. "build-essential libpq-dev" for a
 # python project. No system python or python3-dev: `uv sync` brings a standalone
 # python with headers.
@@ -21,20 +30,34 @@ ARG EXTRA_APT_PACKAGES=""
 # One RUN on purpose: docker/apt comes in as a bind mount and the *.conf copies are
 # removed before the layer is committed, so a mirror login or proxy never lands in the
 # image. Sources and CAs stay; they hold no secrets.
+# Lists are wiped instead of using an apt cache mount: a cache mount needs
+# /etc/apt/apt.conf.d/docker-clean removed and BuildKit cache state, while the wipe works
+# the same everywhere and keeps the layer small. The two are mutually exclusive.
+# nullglob: an unmatched pattern expands to nothing, so the arrays below are empty.
+# DL3008: no version pins, BASE_IMAGE is arbitrary and pins would not resolve on another one.
+# SC3054: false positive, SHELL above is bash but hadolint checks this RUN as POSIX sh.
+# hadolint ignore=DL3008,SC3054
 RUN --mount=type=bind,source=docker/apt,target=/tmp/apt \
     set -e; \
-    if find /tmp/apt -maxdepth 1 \( -name '*.sources' -o -name '*.list' \) | grep -q .; then \
+    shopt -s nullglob; \
+    sources=(/tmp/apt/*.sources /tmp/apt/*.list); \
+    if [ "${#sources[@]}" -gt 0 ]; then \
         rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*; \
-        find /tmp/apt -maxdepth 1 \( -name '*.sources' -o -name '*.list' \) -exec cp {} /etc/apt/sources.list.d/ \; ; \
+        cp "${sources[@]}" /etc/apt/sources.list.d/; \
     fi; \
     for conf in /tmp/apt/*.conf; do \
-        if [ -e "$conf" ]; then cp "$conf" "/etc/apt/apt.conf.d/zz-build-${conf##*/}"; fi; \
+        cp "$conf" "/etc/apt/apt.conf.d/zz-build-${conf##*/}"; \
     done; \
-    mkdir -p /usr/local/share/ca-certificates; \
-    find /tmp/apt -maxdepth 1 -name '*.crt' -exec cp {} /usr/local/share/ca-certificates/ \; ; \
+    certs=(/tmp/apt/*.crt); \
+    if [ "${#certs[@]}" -gt 0 ]; then \
+        mkdir -p /usr/local/share/ca-certificates; \
+        cp "${certs[@]}" /usr/local/share/ca-certificates/; \
+        # Early: apt must trust the https mirror, and a base that already has ca-certificates
+        # will not run its postinst again.
+        if command -v update-ca-certificates >/dev/null; then update-ca-certificates; fi; \
+    fi; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        bash \
         ca-certificates \
         curl \
         git \
@@ -43,18 +66,26 @@ RUN --mount=type=bind,source=docker/apt,target=/tmp/apt \
         procps \
         ripgrep \
         socat \
-        tar \
-        tzdata \
         ${EXTRA_APT_PACKAGES}; \
+    # Late: on a base without ca-certificates the package arrives with the install above;
+    # rebuild the bundle so the corporate certs are in it either way.
+    update-ca-certificates; \
     rm -f /etc/apt/apt.conf.d/zz-build-*; \
     rm -rf /var/lib/apt/lists/*
 
 ARG OPENCODE_UID=1000
 ARG OPENCODE_GID=1000
 # The host GID may already exist in the base image (e.g. 100 "users"); reuse that group then.
-RUN group=$(awk -F: -v gid="$OPENCODE_GID" '$3 == gid { print $1 }' /etc/group); \
+# A taken UID can't be reused the same way (a user is not a group), so fail with a clear message.
+# useradd -l: without it a large host UID (LDAP) makes a sparse lastlog of gigabytes in the layer.
+RUN user=$(awk -F: -v uid="$OPENCODE_UID" '$3 == uid { print $1 }' /etc/passwd); \
+    if [ -n "$user" ]; then \
+        echo "ERROR: UID $OPENCODE_UID is already taken by '$user' in the base image; set OPENCODE_UID in .env to a free one" >&2; \
+        exit 1; \
+    fi; \
+    group=$(awk -F: -v gid="$OPENCODE_GID" '$3 == gid { print $1 }' /etc/group); \
     if [ -z "$group" ]; then group=opencode; groupadd -g "$OPENCODE_GID" "$group"; fi; \
-    useradd -m -u "$OPENCODE_UID" -g "$group" -s /bin/bash opencode
+    useradd -l -m -u "$OPENCODE_UID" -g "$group" -s /bin/bash opencode
 
 ARG INSTALL_UV=0
 RUN --mount=type=bind,from=uv,source=/uv,target=/tmp/uv \

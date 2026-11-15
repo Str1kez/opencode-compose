@@ -7,10 +7,10 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 **Модель реализации:** sonnet, low — документация без ветвлений
 
-- [ ] README описывает прокси для контейнера через клиентский конфиг Docker
-- [ ] README описывает ограничение стадии uv при `INSTALL_UV=0` и обход через зеркало
-- [ ] текст прошёл через `writing-voice`
+- [x] README описывает прокси для контейнера через клиентский конфиг Docker
+- [x] README описывает ограничение стадии uv при `INSTALL_UV=0` и обход через зеркало
+- [x] текст прошёл через `writing-voice`

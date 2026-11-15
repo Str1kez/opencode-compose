@@ -13,6 +13,11 @@ readonly BIN="$BIN_DIR/opencode"
 readonly UPDATE_HOUR_RAW="${OPENCODE_UPDATE_HOUR:-4}"
 readonly SECONDS_PER_DAY=86400
 readonly EXIT_UP_TO_DATE=3
+readonly FETCH_ATTEMPTS=5
+readonly FETCH_RETRY_DELAY=5
+readonly CONNECT_TIMEOUT=10
+readonly MAX_TIME=120
+readonly VERSION_PATTERN='^[0-9]+\.[0-9]+\.[0-9]+$'
 
 # Digits only, 0-23. Parsed with 10#: a bare `09` is an invalid octal number in bash arithmetic.
 validate_update_hour() {
@@ -27,8 +32,44 @@ log() {
     echo "[opencode-update] $(date '+%Y-%m-%d %H:%M:%S') $*" >&2
 }
 
+# retry <what> <command...>: runs the command up to FETCH_ATTEMPTS times, so every kind of
+# failure (connect, DNS, HTTP error, cut transfer, a failed installer) gets the same attempts.
+retry() {
+    local what="$1" attempt
+    shift
+    for ((attempt = 1; attempt <= FETCH_ATTEMPTS; attempt++)); do
+        if "$@"; then
+            return 0
+        fi
+        log "$what failed (attempt $attempt/$FETCH_ATTEMPTS)"
+        ((attempt == FETCH_ATTEMPTS)) || sleep "$FETCH_RETRY_DELAY"
+    done
+    return 1
+}
+
+# fetch_once <url> [output file]: https only, also across redirects.
+fetch_once() {
+    local url="$1"
+    local -a output=()
+    [[ -z "${2:-}" ]] || output=(-o "$2")
+    curl -fsSL --proto '=https' --proto-redir '=https' \
+        --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+        ${output[@]+"${output[@]}"} "$url"
+}
+
+fetch() {
+    retry "request to $1" fetch_once "$@"
+}
+
 latest_version() {
-    curl -fsSL "$LATEST_URL" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p'
+    local body version
+    body=$(fetch "$LATEST_URL") || return 1
+    version=$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' <<< "$body")
+    if ! [[ "$version" =~ $VERSION_PATTERN ]]; then
+        log "latest version answer is not a version (expected X.Y.Z): '${version:-${body:0:80}}'"
+        return 1
+    fi
+    echo "$version"
 }
 
 installed_version() {
@@ -38,6 +79,21 @@ installed_version() {
     echo "${raw#v}"
 }
 
+# One attempt: download the installer in full first (a connection cut mid-stream must not
+# run half a script), then run it. The installer downloads the binary with its own curl,
+# so the caller retries the whole attempt.
+install_attempt() {
+    local version="$1" tmp_dir="$2" installer status=0
+    installer=$(mktemp "$tmp_dir/installer.XXXXXX")
+    if fetch_once "$INSTALL_URL" "$installer"; then
+        TMPDIR="$tmp_dir" bash "$installer" --no-modify-path --version "$version" || status=$?
+    else
+        status=1
+    fi
+    rm -f "$installer"
+    return "$status"
+}
+
 install_version() {
     local version="$1"
     # The installer moves the binary out of TMPDIR. Keeping TMPDIR on the same volume
@@ -45,7 +101,7 @@ install_version() {
     # old binary is still running.
     local tmp_dir="$HOME/.opencode/tmp"
     mkdir -p "$tmp_dir"
-    curl -fsSL "$INSTALL_URL" | TMPDIR="$tmp_dir" bash -s -- --no-modify-path --version "$version"
+    retry "installing opencode $version" install_attempt "$version" "$tmp_dir"
 }
 
 cmd_install() {
@@ -55,11 +111,10 @@ cmd_install() {
         return 0
     fi
     local latest
-    latest=$(latest_version)
-    if [[ -z "$latest" ]]; then
+    latest=$(latest_version) || {
         log "failed to resolve the latest version"
         return 1
-    fi
+    }
     log "installing opencode $latest"
     install_version "$latest"
 }
