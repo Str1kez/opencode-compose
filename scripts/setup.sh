@@ -475,11 +475,13 @@ sh_quote() {
 # Whether WORKSPACE inside the colima VM is the host folder and not an empty directory that
 # docker created on a previous bind of an unmounted path. Probes the repository marker
 # WORKSPACE/.git. Returns 0 seen, 1 not seen, 2 can't tell (no .git on the host).
-# `colima ssh` runs the command through a shell, hence the quoting.
+# The probe goes to the VM's sh on stdin: lima versions differ in whether `colima ssh`
+# quotes its arguments, so a quoted argument is either right or quoted twice.
 colima_sees_workspace() {
   local marker="$1/.git"
   [[ -e "$marker" ]] || return 2
-  colima ssh --profile "$COLIMA_PROFILE" -- test -e "$(sh_quote "$marker")" >/dev/null 2>&1 || return 1
+  printf 'test -e %s\n' "$(sh_quote "$marker")" \
+    | colima ssh --profile "$COLIMA_PROFILE" -- sh >/dev/null 2>&1 || return 1
 }
 
 # Sets COLIMA_CMD to `colima <subcommand>` for the chosen profile.

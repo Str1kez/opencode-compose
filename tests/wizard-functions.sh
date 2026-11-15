@@ -200,3 +200,20 @@ pass "colima start: no overlapping mounts, HOME always kept"
   [[ "$(find docker/apt -type f -exec basename {} \;)" == "README.md" ]] || fail "clearing apt config left files behind"
 )
 pass "apt config: apt files copied, old set replaced, README kept"
+
+# colima mount probe: lima 2.x quotes `colima ssh` arguments itself, so a path quoted by the
+# wizard was quoted twice and an existing repository read as "not mounted".
+mkdir -p "$work/colima ws/it's/.git"
+(
+  # shellcheck disable=SC2034  # read by colima_sees_workspace from wizard-lib.sh
+  COLIMA_PROFILE=default
+  colima() {
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    local quoted
+    printf -v quoted '%q ' "$@"
+    bash -c "$quoted"
+  }
+  colima_sees_workspace "$work/colima ws/it's" || fail "existing workspace reported as not mounted (rc $?)"
+)
+pass "colima probe: path with a space and a quote is found through a quoting colima ssh"
