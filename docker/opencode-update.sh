@@ -32,22 +32,33 @@ log() {
     echo "[opencode-update] $(date '+%Y-%m-%d %H:%M:%S') $*" >&2
 }
 
-# fetch <url> [output file]: https only (also across redirects), retried in a loop so every kind of
-# failure (connect, DNS, HTTP error, cut transfer) gets the same attempts.
-fetch() {
-    local url="$1" attempt
-    local -a output=()
-    [[ -z "${2:-}" ]] || output=(-o "$2")
+# retry <what> <command...>: runs the command up to FETCH_ATTEMPTS times, so every kind of
+# failure (connect, DNS, HTTP error, cut transfer, a failed installer) gets the same attempts.
+retry() {
+    local what="$1" attempt
+    shift
     for ((attempt = 1; attempt <= FETCH_ATTEMPTS; attempt++)); do
-        if curl -fsSL --proto '=https' --proto-redir '=https' \
-            --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
-            ${output[@]+"${output[@]}"} "$url"; then
+        if "$@"; then
             return 0
         fi
-        log "request to $url failed (attempt $attempt/$FETCH_ATTEMPTS)"
+        log "$what failed (attempt $attempt/$FETCH_ATTEMPTS)"
         ((attempt == FETCH_ATTEMPTS)) || sleep "$FETCH_RETRY_DELAY"
     done
     return 1
+}
+
+# fetch_once <url> [output file]: https only, also across redirects.
+fetch_once() {
+    local url="$1"
+    local -a output=()
+    [[ -z "${2:-}" ]] || output=(-o "$2")
+    curl -fsSL --proto '=https' --proto-redir '=https' \
+        --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+        ${output[@]+"${output[@]}"} "$url"
+}
+
+fetch() {
+    retry "request to $1" fetch_once "$@"
 }
 
 latest_version() {
@@ -68,6 +79,21 @@ installed_version() {
     echo "${raw#v}"
 }
 
+# One attempt: download the installer in full first (a connection cut mid-stream must not
+# run half a script), then run it. The installer downloads the binary with its own curl,
+# so the caller retries the whole attempt.
+install_attempt() {
+    local version="$1" tmp_dir="$2" installer status=0
+    installer=$(mktemp "$tmp_dir/installer.XXXXXX")
+    if fetch_once "$INSTALL_URL" "$installer"; then
+        TMPDIR="$tmp_dir" bash "$installer" --no-modify-path --version "$version" || status=$?
+    else
+        status=1
+    fi
+    rm -f "$installer"
+    return "$status"
+}
+
 install_version() {
     local version="$1"
     # The installer moves the binary out of TMPDIR. Keeping TMPDIR on the same volume
@@ -75,17 +101,7 @@ install_version() {
     # old binary is still running.
     local tmp_dir="$HOME/.opencode/tmp"
     mkdir -p "$tmp_dir"
-    # Download in full first: a connection cut mid-stream must not run half a script.
-    local installer
-    installer=$(mktemp "$tmp_dir/installer.XXXXXX")
-    if ! fetch "$INSTALL_URL" "$installer"; then
-        rm -f "$installer"
-        return 1
-    fi
-    local status=0
-    TMPDIR="$tmp_dir" bash "$installer" --no-modify-path --version "$version" || status=$?
-    rm -f "$installer"
-    return "$status"
+    retry "installing opencode $version" install_attempt "$version" "$tmp_dir"
 }
 
 cmd_install() {

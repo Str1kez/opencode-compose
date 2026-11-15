@@ -19,8 +19,9 @@ services:
     image: opencode-server:${COMPOSE_PROJECT_NAME}
     init: true
     restart: unless-stopped
-    # The server runs as a non-root user from the start and needs no capability:
-    # it listens on 4096, socat forwards ports above 1024, nothing calls chown or setuid.
+    # The process is non-root from its first instruction, so it never had effective
+    # capabilities: dropping them changes nothing for socat (ports below 1024 never worked
+    # as non-root) and nothing calls chown or setuid.
     cap_drop:
       - ALL
     security_opt:

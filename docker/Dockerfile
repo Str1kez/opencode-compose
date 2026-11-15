@@ -52,6 +52,8 @@ RUN --mount=type=bind,source=docker/apt,target=/tmp/apt \
     if [ "${#certs[@]}" -gt 0 ]; then \
         mkdir -p /usr/local/share/ca-certificates; \
         cp "${certs[@]}" /usr/local/share/ca-certificates/; \
+        # Early: apt must trust the https mirror, and a base that already has ca-certificates
+        # will not run its postinst again.
         if command -v update-ca-certificates >/dev/null; then update-ca-certificates; fi; \
     fi; \
     apt-get update; \
@@ -65,6 +67,8 @@ RUN --mount=type=bind,source=docker/apt,target=/tmp/apt \
         ripgrep \
         socat \
         ${EXTRA_APT_PACKAGES}; \
+    # Late: on a base without ca-certificates the package arrives with the install above;
+    # rebuild the bundle so the corporate certs are in it either way.
     update-ca-certificates; \
     rm -f /etc/apt/apt.conf.d/zz-build-*; \
     rm -rf /var/lib/apt/lists/*
