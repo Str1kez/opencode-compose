@@ -1125,9 +1125,23 @@ stage "Дополнительные папки и симлинки"
 say "Конфиги монтируются только на чтение. Абсолютные симлинки в них работают, только если"
 say "их цель смонтирована по тому же пути. Соберу $OVERRIDE_FILE с нужными папками."
 scan_dirs=("$HOST_OPENCODE_CONFIG")
-if [[ -d "$HOME/.agents" ]] && confirm "Подключить $HOME/.agents (глобальные скиллы)?"; then
-  extra_mounts+=("$HOME/.agents:/home/opencode/.agents")
-  scan_dirs+=("$HOME/.agents")
+HOST_AGENTS_DIR="$HOME/.agents"
+if [[ ! -d "$HOST_AGENTS_DIR" ]]; then
+  while true; do
+    HOST_AGENTS_DIR=""
+    ask HOST_AGENTS_DIR "Папка с глобальными скиллами агента (обычно ~/.agents), Enter — нет такой, «-» — убрать:" || break
+    case "$HOST_AGENTS_DIR" in
+      "" | -) HOST_AGENTS_DIR=""; break ;;
+    esac
+    HOST_AGENTS_DIR=$(expand_path "$HOST_AGENTS_DIR")
+    [[ -d "$HOST_AGENTS_DIR" ]] && break
+    warn "папки $HOST_AGENTS_DIR нет"
+  done
+  write_env HOST_AGENTS_DIR "$HOST_AGENTS_DIR"
+fi
+if [[ -n "$HOST_AGENTS_DIR" ]] && confirm "Подключить $HOST_AGENTS_DIR (глобальные скиллы)?"; then
+  extra_mounts+=("$HOST_AGENTS_DIR:/home/opencode/.agents")
+  scan_dirs+=("$HOST_AGENTS_DIR")
 fi
 if [[ -d "$HOME/.config/git" ]] && confirm "Подключить $HOME/.config/git (глобальный gitignore)?"; then
   extra_mounts+=("$HOME/.config/git:/home/opencode/.config/git")
