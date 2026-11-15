@@ -10,6 +10,10 @@
 
 - [ ] `cap_drop: ALL`, `no-new-privileges`, `pids_limit`; сервер, socat-проброс портов и апдейтер работают
 - [ ] `start_period` и `stop_grace_period` подняты, `docker compose down` останавливает контейнер с кодом 143, а не по SIGKILL
-- [ ] пустой WORKSPACE даёт внятную ошибку compose во всех подстановках
+- [x] пустой WORKSPACE даёт внятную ошибку compose во всех подстановках
 - [ ] оба смоука зелёные
-- [ ] запись в CHANGELOG
+- [x] запись в CHANGELOG
+
+## Comments
+
+- Пункты 1, 2 (код 143) и 4 не отмечены: нет Docker daemon, рантайм и смоуки не запускались. Изменения в compose (`cap_drop`, `no-new-privileges`, `pids_limit`, `start_period: 300s`, `stop_grace_period: 30s`) проверены только через `docker compose config`; по коду ни одной capability рантайму не нужно (USER opencode с первой инструкции, порты > 1024, нет chown/setuid).
