@@ -34,6 +34,9 @@ ARG EXTRA_APT_PACKAGES=""
 # /etc/apt/apt.conf.d/docker-clean removed and BuildKit cache state, while the wipe works
 # the same everywhere and keeps the layer small. The two are mutually exclusive.
 # nullglob: an unmatched pattern expands to nothing, so the arrays below are empty.
+# DL3008: no version pins, BASE_IMAGE is arbitrary and pins would not resolve on another one.
+# SC3054: false positive, SHELL above is bash but hadolint checks this RUN as POSIX sh.
+# hadolint ignore=DL3008,SC3054
 RUN --mount=type=bind,source=docker/apt,target=/tmp/apt \
     set -e; \
     shopt -s nullglob; \
@@ -70,6 +73,7 @@ ARG OPENCODE_UID=1000
 ARG OPENCODE_GID=1000
 # The host GID may already exist in the base image (e.g. 100 "users"); reuse that group then.
 # A taken UID can't be reused the same way (a user is not a group), so fail with a clear message.
+# useradd -l: without it a large host UID (LDAP) makes a sparse lastlog of gigabytes in the layer.
 RUN user=$(awk -F: -v uid="$OPENCODE_UID" '$3 == uid { print $1 }' /etc/passwd); \
     if [ -n "$user" ]; then \
         echo "ERROR: UID $OPENCODE_UID is already taken by '$user' in the base image; set OPENCODE_UID in .env to a free one" >&2; \
@@ -77,7 +81,7 @@ RUN user=$(awk -F: -v uid="$OPENCODE_UID" '$3 == uid { print $1 }' /etc/passwd);
     fi; \
     group=$(awk -F: -v gid="$OPENCODE_GID" '$3 == gid { print $1 }' /etc/group); \
     if [ -z "$group" ]; then group=opencode; groupadd -g "$OPENCODE_GID" "$group"; fi; \
-    useradd -m -u "$OPENCODE_UID" -g "$group" -s /bin/bash opencode
+    useradd -l -m -u "$OPENCODE_UID" -g "$group" -s /bin/bash opencode
 
 ARG INSTALL_UV=0
 RUN --mount=type=bind,from=uv,source=/uv,target=/tmp/uv \
