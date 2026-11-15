@@ -169,6 +169,37 @@ second=$(venv_volume_name "/work/a/b-c")
 [[ "$first" =~ ^opencode-venv-[a-z0-9-]+$ ]] || fail "bad volume name: $first"
 pass "helpers: sh_quote, unverifiable mount, per-path venv volume"
 
+# Compose project per repository: two repositories never share a project or a default port,
+# and a re-run on the same repository keeps the project its container already runs under.
+mkdir -p "$work/project"
+(
+  ENV_FILE="$work/project/.env"
+  save_workspace_identity "/work/a-b/c" "" > /dev/null
+  first_project=$(_existing COMPOSE_PROJECT_NAME)
+  first_port=$(_existing OPENCODE_PORT)
+  [[ "$first_project" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || fail "invalid compose project name: $first_project"
+  [[ "$first_project" != opencode ]] || fail "first run kept the shared project name"
+  [[ "$first_port" =~ ^[0-9]+$ ]] && (( first_port > 1024 && first_port <= 65535 )) \
+    || fail "bad derived port: $first_port"
+
+  save_workspace_identity "/work/a/b-c" "/work/a-b/c" > /dev/null
+  [[ "$(_existing COMPOSE_PROJECT_NAME)" != "$first_project" ]] || fail "similar paths share a compose project"
+  [[ "$(_existing OPENCODE_PORT)" != "$first_port" ]] || fail "another repository kept the old port"
+
+  write_env COMPOSE_PROJECT_NAME "hand-picked" > /dev/null
+  write_env OPENCODE_PORT "4321" > /dev/null
+  save_workspace_identity "/work/a/b-c" "/work/a/b-c" > /dev/null
+  [[ "$(_existing COMPOSE_PROJECT_NAME)" == "hand-picked" ]] || fail "re-run changed the saved project name"
+  [[ "$(_existing OPENCODE_PORT)" == "4321" ]] || fail "re-run changed the saved port"
+
+  printf "WORKSPACE='/work/legacy'\nOPENCODE_PORT='4096'\n" > "$ENV_FILE"
+  save_workspace_identity "/work/legacy" "/work/legacy" > /dev/null
+  [[ "$(_existing COMPOSE_PROJECT_NAME)" == opencode ]] \
+    || fail "setup from before per-repo projects lost its project 'opencode'"
+  [[ "$(_existing OPENCODE_PORT)" == 4096 ]] || fail "setup from before per-repo projects lost its port"
+)
+pass "compose project: per repository, kept on re-run, legacy setup stays 'opencode'"
+
 # colima refuses overlapping mounts: a WORKSPACE inside $HOME must not get a mount of its own.
 (
   HOME="/Users/someone"

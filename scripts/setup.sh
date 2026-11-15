@@ -199,6 +199,11 @@ finish() {
 # ──────────────────────────────────────────────────────────────────────────
 
 readonly DEFAULT_PORT=4096
+# Derived ports land in 4097..4996: above the default, below macOS AirPlay on 5000.
+readonly WORKSPACE_PORT_FIRST=4097
+readonly WORKSPACE_PORT_COUNT=900
+# docker-compose.yml's `name:`, the project of every setup made before names were derived.
+readonly LEGACY_PROJECT_NAME="opencode"
 readonly DEFAULT_UPDATE_HOUR=4
 readonly DEFAULT_BASE_IMAGE="debian:trixie-slim"
 readonly PYTHON_PROFILE_APT_PACKAGES="build-essential"
@@ -830,15 +835,48 @@ check_git_push_from_container() {
   fi
 }
 
-# Prints the name of the .venv volume of a repository: a readable tail of the path plus a
-# checksum of the whole path, so repositories with similar paths still get different volumes.
-venv_volume_name() {
-  local slug sum
+path_checksum() {
+  printf '%s' "$1" | cksum | cut -d' ' -f1
+}
+
+# Prints a per-repository name suffix: a readable tail of the path plus a checksum of the
+# whole path, so repositories with similar paths still get different names.
+workspace_slug() {
+  local slug
   slug=$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '-' | tr -s '-' | tr '[:upper:]' '[:lower:]')
   slug="${slug#-}"; slug="${slug%-}"
   slug="${slug: -40}"; slug="${slug#-}"
-  sum=$(printf '%s' "$1" | cksum | cut -d' ' -f1)
-  printf 'opencode-venv-%s-%s' "$slug" "$sum"
+  printf '%s-%s' "$slug" "$(path_checksum "$1")"
+}
+
+venv_volume_name() {
+  printf 'opencode-venv-%s' "$(workspace_slug "$1")"
+}
+
+compose_project_name() {
+  printf 'opencode-%s' "$(workspace_slug "$1")"
+}
+
+# A stable port per repository, so two repositories set up one after another don't both
+# ask for 4096. lsof in the port stage still catches a collision with anything else.
+workspace_port() {
+  printf '%s' $(( WORKSPACE_PORT_FIRST + $(path_checksum "$1") % WORKSPACE_PORT_COUNT ))
+}
+
+# Writes the compose project, the .venv volume and, for a new repository, its port to .env.
+# A re-run on the same repository keeps the saved project and port. A setup made before
+# project names were derived runs as project `opencode`: renaming it would leave that
+# container running beside the new one on the same port.
+save_workspace_identity() {
+  local workspace="$1" saved_workspace="$2" project
+  if [[ "$workspace" == "$saved_workspace" ]]; then
+    project=$(_existing COMPOSE_PROJECT_NAME || true)
+    write_env COMPOSE_PROJECT_NAME "${project:-$LEGACY_PROJECT_NAME}"
+  else
+    write_env COMPOSE_PROJECT_NAME "$(compose_project_name "$workspace")"
+    write_env OPENCODE_PORT "$(workspace_port "$workspace")"
+  fi
+  write_env VENV_VOLUME "$(venv_volume_name "$workspace")"
 }
 
 # Replaces the corporate apt setup in $APT_CONFIG_DIR with the files from SRC (a host
@@ -933,6 +971,10 @@ pause "Enter, чтобы продолжить"
 stage "Рабочий репозиторий"
 say "Папка, в которой opencode будет работать. Контейнер видит её на запись"
 say "по тому же абсолютному пути, что и на хосте."
+saved_workspace=$(_existing WORKSPACE || true)
+if [[ -n "$saved_workspace" && -d "$saved_workspace" ]]; then
+  saved_workspace=$(cd "$saved_workspace" && pwd -P)
+fi
 while true; do
   ask WORKSPACE "Путь к репозиторию:"
   WORKSPACE=$(expand_path "${WORKSPACE:-}")
@@ -943,7 +985,7 @@ while true; do
   warn "папки '$WORKSPACE' нет"
 done
 write_env WORKSPACE "$WORKSPACE"
-write_env VENV_VOLUME "$(venv_volume_name "$WORKSPACE")"
+save_workspace_identity "$WORKSPACE" "$saved_workspace"
 # The container's own .venv volume is mounted over this directory. Without it Docker
 # creates the mount point itself, as root on Linux.
 if [[ ! -e "$WORKSPACE/.venv" ]]; then
@@ -981,9 +1023,10 @@ OPENCODE_SERVER_PASSWORD=$(_existing OPENCODE_SERVER_PASSWORD)
 # ── 5 ─────────────────────────────────────────────────────────────────────
 stage "Порт, часовой пояс, время обновления"
 note "Enter без ввода берёт значение в квадратных скобках."
+port_default=$(_existing OPENCODE_PORT || printf '%s' "$DEFAULT_PORT")
 while true; do
-  ask OPENCODE_PORT "Порт на хосте [$DEFAULT_PORT]:"
-  OPENCODE_PORT="${OPENCODE_PORT:-$DEFAULT_PORT}"
+  ask OPENCODE_PORT "Порт на хосте [$port_default]:"
+  OPENCODE_PORT="${OPENCODE_PORT:-$port_default}"
   [[ "$OPENCODE_PORT" =~ ^[0-9]+$ ]] && (( OPENCODE_PORT >= 1 && OPENCODE_PORT <= 65535 )) && break
   warn "порт должен быть числом от 1 до 65535"
 done

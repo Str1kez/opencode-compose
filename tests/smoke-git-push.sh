@@ -4,8 +4,9 @@
 # own compose project and pushes from inside the container.
 #
 # Usage: tests/smoke-git-push.sh [NN]
-# Uses compose project oc-tNN, host port 41NN and image opencode-server:tNN, so it never
-# touches the real `opencode` project. Removes its containers, network and volumes on exit.
+# Uses compose project oc-tNN, host port 41NN, image opencode-server:tNN and home volume
+# oc-tNN-home, so it never touches a real project or the shared home volume. Removes its
+# containers, network and volumes on exit.
 set -euo pipefail
 
 id="${1:-01}"
@@ -115,6 +116,7 @@ WORKSPACE='$ws'
 OPENCODE_SERVER_PASSWORD='smoke-password-$id'
 OPENCODE_PORT='41$id'
 VENV_VOLUME='$project-venv'
+HOME_VOLUME='$project-home'
 HOST_OPENCODE_CONFIG='$work/opencode-config'
 HOST_GITCONFIG='$work/gitconfig'
 GIT_SSH_COMMAND='$(cat "$work/git-ssh-command")'
