@@ -24,14 +24,36 @@ warn_broken_symlinks() {
     done
 }
 
+readonly STOP_TIMEOUT=10
+readonly EXIT_SIGTERM=143
+
 child_pids=()
+
+# SIGTERM every child, give them STOP_TIMEOUT seconds, SIGKILL the leftovers.
+stop_children() {
+    # A second signal must not re-enter this function while it waits.
+    trap '' TERM INT
+    ((${#child_pids[@]})) || return 0
+    kill -TERM "${child_pids[@]}" 2>/dev/null || true
+    {
+        sleep "$STOP_TIMEOUT"
+        kill -KILL "${child_pids[@]}" 2>/dev/null || true
+    } &
+    local watchdog=$!
+    wait "${child_pids[@]}" 2>/dev/null || true
+    kill "$watchdog" 2>/dev/null || true
+}
+
+# Set before the first child starts: bash runs a trap only between commands, so the
+# children below are always started in the background and awaited with `wait`.
+trap 'stop_children; exit "$EXIT_SIGTERM"' TERM INT
 
 # The opencode config is shared with the host, so it may point providers or MCP
 # servers at 127.0.0.1:<port> on the host. Inside the container that address is the
 # container itself; forward each listed port to the same port on the host.
 start_host_loopback_forwards() {
-    local port
-    for port in ${HOST_LOOPBACK_PORTS//,/ }; do
+    local port ports="${HOST_LOOPBACK_PORTS:-}"
+    for port in ${ports//,/ }; do
         if ! [[ "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535 || port == PORT)); then
             echo "HOST_LOOPBACK_PORTS: invalid port '$port' (1-65535, not $PORT)" >&2
             exit 1
@@ -48,7 +70,11 @@ start_host_loopback_forwards() {
 }
 
 warn_broken_symlinks
-opencode-update install
+opencode-update install &
+install_pid=$!
+child_pids+=("$install_pid")
+wait "$install_pid"
+child_pids=()
 start_host_loopback_forwards
 
 opencode serve --hostname 0.0.0.0 --port "$PORT" &
@@ -56,12 +82,6 @@ child_pids+=("$!")
 
 opencode-update loop &
 child_pids+=("$!")
-
-stop_children() {
-    kill -TERM "${child_pids[@]}" 2>/dev/null || true
-    wait "${child_pids[@]}" 2>/dev/null || true
-}
-trap 'stop_children; exit 0' TERM INT
 
 set +e
 wait -n "${child_pids[@]}"

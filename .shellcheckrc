@@ -1,0 +1,4 @@
+# Both come from the generated wizard library in scripts/setup.sh (above the STAGES marker):
+# SC1087 is a false positive on `$e[...]` inside a string at the library prompt, and
+# SC2329 flags library functions this wizard doesn't call.
+disable=SC1087,SC2329

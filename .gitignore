@@ -1,2 +1,6 @@
 .env
 docker-compose.override.yml
+.git-ssh/
+.claude/worktrees/
+docker/apt/*
+!docker/apt/README.md

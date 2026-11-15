@@ -201,9 +201,14 @@ finish() {
 readonly DEFAULT_PORT=4096
 readonly DEFAULT_UPDATE_HOUR=4
 readonly DEFAULT_BASE_IMAGE="debian:trixie-slim"
-readonly DEFAULT_APT_PACKAGES="build-essential python3-dev"
+readonly PYTHON_PROFILE_APT_PACKAGES="build-essential"
 readonly HEALTH_TIMEOUT_SECONDS=900
 readonly OVERRIDE_FILE="docker-compose.override.yml"
+readonly APT_CONFIG_DIR="docker/apt"
+readonly DEFAULT_UV_REGISTRY="ghcr.io"
+readonly KNOWN_HOSTS_FILE=".git-ssh/known_hosts"
+readonly CONTAINER_GIT_KEY="/run/git-ssh/id"
+readonly CONTAINER_KNOWN_HOSTS="/run/git-ssh/known_hosts"
 
 expand_path() {
   local path="$1"
@@ -286,6 +291,277 @@ config_loopback_ports() {
     | sed 's/.*://' | sort -un | grep -vx "$DEFAULT_PORT" | paste -sd, - || true
 }
 
+# confirm_default 1|0 "question" is a yes/no gate whose Enter answer is the saved one:
+# 1 shows [Y/n] and Enter means yes, 0 shows [y/N] and Enter means no.
+confirm_default() {
+  local default="$1" hint="y/N" reply=""
+  [[ "$default" == 1 ]] && hint="Y/n"
+  printf '  %s? %s [%s]%s ' "$YELLOW" "$2" "$hint" "$RESET"
+  read -r reply || true
+  if [[ -z "$reply" ]]; then
+    [[ "$default" == 1 ]]
+    return
+  fi
+  [[ "$reply" =~ ^[Yy] ]]
+}
+
+# Prints 1 when git push over ssh was configured by an earlier run, else 0.
+saved_git_ssh_flag() {
+  local command
+  command=$(_existing GIT_SSH_COMMAND || true)
+  if [[ -n "$command" && "$command" != "ssh" ]]; then printf '1'; else printf '0'; fi
+}
+
+# Prints 1 when the python profile was enabled by an earlier run, else 0.
+saved_python_profile_flag() {
+  if [[ "$(_existing INSTALL_UV || true)" == "1" ]]; then printf '1'; else printf '0'; fi
+}
+
+# True when a docker endpoint (unix:///path/to/docker.sock) lives in colima's home.
+endpoint_is_colima() {
+  local path="${1#unix://}"
+  [[ "$path" == "$HOME/.colima/"* || "$path" == "${COLIMA_HOME:-$HOME/.colima}/"* ]]
+}
+
+context_endpoint() {
+  docker context inspect --format '{{.Endpoints.docker.Host}}' "$1" 2>/dev/null || true
+}
+
+# Prints the engine a docker context points at: colima, orbstack, docker-desktop or other.
+# colima names the context of profile P "colima-P" and the default profile's plain "colima";
+# a context named otherwise (or `default` with DOCKER_HOST) is recognised by its endpoint.
+engine_for_context() {
+  case "$1" in
+    colima|colima-*) printf 'colima'; return ;;
+    orbstack) printf 'orbstack'; return ;;
+    desktop-linux) printf 'docker-desktop'; return ;;
+  esac
+  if endpoint_is_colima "$(context_endpoint "$1")"; then printf 'colima'; else printf 'other'; fi
+}
+
+# Prints the Docker engine behind the current docker CLI. DOCKER_HOST overrides contexts.
+# The context works even when the daemon is down; the daemon's own name is the fallback.
+detect_engine() {
+  local engine os
+  if [[ -n "${DOCKER_HOST:-}" ]]; then
+    if endpoint_is_colima "$DOCKER_HOST"; then engine=colima; else engine=other; fi
+  else
+    engine=$(engine_for_context "$(docker context show 2>/dev/null || true)")
+  fi
+  if [[ "$engine" != "other" ]]; then
+    printf '%s' "$engine"
+    return
+  fi
+  os=$(docker info --format '{{.OperatingSystem}}' 2>/dev/null || true)
+  case "$os" in
+    *OrbStack*) printf 'orbstack' ;;
+    *"Docker Desktop"*) printf 'docker-desktop' ;;
+    *)
+      if [[ -z "$os" ]] && command -v colima >/dev/null 2>&1; then
+        printf 'colima'
+      else
+        printf 'other'
+      fi
+      ;;
+  esac
+}
+
+# The one place that knows each engine. Sets ENGINE_TITLE, ENGINE_IS_COLIMA (1/0) and
+# ENGINE_MOUNT_NOTE (lines shown for WORKSPACE, colima has its own check instead).
+engine_profile() {
+  local engine="$1" workspace="$2"
+  ENGINE_IS_COLIMA=0
+  ENGINE_MOUNT_NOTE=""
+  case "$engine" in
+    colima)
+      ENGINE_TITLE="colima"
+      ENGINE_IS_COLIMA=1
+      ;;
+    orbstack)
+      ENGINE_TITLE="OrbStack"
+      ENGINE_MOUNT_NOTE="✓ OrbStack пробрасывает любой путь хоста, $workspace контейнер увидит."
+      ;;
+    docker-desktop)
+      ENGINE_TITLE="Docker Desktop"
+      ENGINE_MOUNT_NOTE="Docker Desktop пробрасывает пути из Settings → Resources → File sharing."$'\n'"По умолчанию там /Users, /Volumes, /private, /tmp. Репозиторий в другом месте добавь туда."
+      ;;
+    *)
+      ENGINE_TITLE="docker-совместимый движок"
+      ENGINE_MOUNT_NOTE="Движок не опознал. Если контейнер не увидит $workspace, разреши движку доступ к этой папке."
+      ;;
+  esac
+}
+
+# Sets ENGINE (and ENGINE_CONTEXT) to the engine this run uses. The current docker context
+# decides, unless the saved engine in ENV_FILE differs or several engine contexts exist:
+# then the user picks, with the saved engine as the Enter default. A pick of another
+# context is exported as DOCKER_CONTEXT for the rest of the run.
+choose_engine() {
+  local current saved name engine i default_index=0 pick reply
+  local names=() engines=()
+  current=$(docker context show 2>/dev/null || true)
+  ENGINE=$(detect_engine)
+  ENGINE_CONTEXT="$current"
+  [[ -z "${DOCKER_HOST:-}" ]] || return 0
+  saved=$(_existing DOCKER_ENGINE || true)
+  if [[ -n "$saved" && "$saved" != "$ENGINE" ]]; then
+    warn "в $ENV_FILE сохранён движок $saved, а docker сейчас смотрит в $ENGINE (контекст $current)."
+  fi
+
+  names+=("$current"); engines+=("$ENGINE")
+  while IFS= read -r name; do
+    [[ -n "$name" && "$name" != "$current" ]] || continue
+    engine=$(engine_for_context "$name")
+    [[ "$engine" != "other" ]] || continue
+    names+=("$name"); engines+=("$engine")
+  done < <(docker context ls --format '{{.Name}}' 2>/dev/null || true)
+  (( ${#names[@]} > 1 )) || return 0
+
+  for i in "${!names[@]}"; do
+    [[ -n "$saved" && "${engines[$i]}" == "$saved" ]] && { default_index=$i; break; }
+  done
+  say "Несколько движков docker, какой использовать?"
+  for i in "${!names[@]}"; do
+    step "$((i + 1)). ${names[$i]} (${engines[$i]})$([[ $i -eq $default_index ]] && printf ' [Enter]')"
+  done
+  while true; do
+    printf '  %s? Номер:%s ' "$YELLOW" "$RESET"
+    read -r reply || reply=""
+    pick="${reply:-$((default_index + 1))}"
+    [[ "$pick" =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= ${#names[@]} )) && break
+    warn "нужен номер от 1 до ${#names[@]}"
+  done
+  ENGINE="${engines[$((pick - 1))]}"
+  ENGINE_CONTEXT="${names[$((pick - 1))]}"
+  if [[ "$ENGINE_CONTEXT" != "$current" ]]; then
+    export DOCKER_CONTEXT="$ENGINE_CONTEXT"
+    warn "это только для визарда. Свои docker compose команды запускай после: docker context use $ENGINE_CONTEXT"
+  fi
+}
+
+# The colima profile behind the current docker context: "colima-P" or an endpoint
+# <colima home>/P/docker.sock names it; anything else is the default profile.
+colima_profile() {
+  local context endpoint path
+  if [[ -n "${DOCKER_HOST:-}" ]]; then
+    endpoint="$DOCKER_HOST"
+  else
+    context=$(docker context show 2>/dev/null || true)
+    case "$context" in
+      colima-*) printf '%s' "${context#colima-}"; return ;;
+    esac
+    endpoint=$(context_endpoint "$context")
+  fi
+  path="${endpoint#unix://}"
+  path="${path#"$HOME"/.colima/}"
+  path="${path#"${COLIMA_HOME:-$HOME/.colima}"/}"
+  if [[ "$path" == */docker.sock && "$path" != "${endpoint#unix://}" ]]; then
+    printf '%s' "${path%%/*}"
+  else
+    printf 'default'
+  fi
+}
+
+colima_running() {
+  colima status --profile "$COLIMA_PROFILE" >/dev/null 2>&1
+}
+
+# Single-quotes a string for a POSIX sh.
+sh_quote() {
+  local quote="'" escaped="'\\''"
+  printf "'%s'" "${1//$quote/$escaped}"
+}
+
+# Whether WORKSPACE inside the colima VM is the host folder and not an empty directory that
+# docker created on a previous bind of an unmounted path. Probes the repository marker
+# WORKSPACE/.git. Returns 0 seen, 1 not seen, 2 can't tell (no .git on the host).
+# The probe goes to the VM's sh on stdin: lima versions differ in whether `colima ssh`
+# quotes its arguments, so a quoted argument is either right or quoted twice.
+colima_sees_workspace() {
+  local marker="$1/.git"
+  [[ -e "$marker" ]] || return 2
+  printf 'test -e %s\n' "$(sh_quote "$marker")" \
+    | colima ssh --profile "$COLIMA_PROFILE" -- sh >/dev/null 2>&1 || return 1
+}
+
+# Sets COLIMA_CMD to `colima <subcommand>` for the chosen profile.
+colima_command() {
+  COLIMA_CMD=(colima "$1")
+  [[ "$COLIMA_PROFILE" == "default" ]] || COLIMA_CMD+=(--profile "$COLIMA_PROFILE")
+}
+
+# Sets COLIMA_START to the start command that makes WORKSPACE visible in the VM.
+# `colima start --mount` replaces the whole mount list, including the default
+# $HOME that holds the configs the container mounts, so $HOME is always passed.
+# colima refuses overlapping mounts, so a WORKSPACE inside $HOME is covered by
+# $HOME alone and gets no mount of its own.
+set_colima_start() {
+  local workspace="$1"
+  colima_command start
+  COLIMA_START=("${COLIMA_CMD[@]}")
+  if [[ "$workspace" != "$HOME" && "$workspace" != "$HOME"/* ]]; then
+    COLIMA_START+=(--mount "$workspace:w")
+  fi
+  COLIMA_START+=(--mount "$HOME:w")
+}
+
+# Prints a command array as a copy-pasteable shell line.
+shell_line() {
+  local line
+  printf -v line '%q ' "$@"
+  printf '%s' "${line% }"
+}
+
+# Stage "Репозиторий внутри движка" for colima: gets WORKSPACE visible in the VM or fails.
+ensure_colima_workspace() {
+  local workspace="$1" seen=0 running_containers
+  if ! command -v colima >/dev/null 2>&1; then
+    warn "docker смотрит в контекст colima, а команды colima нет. Поставь её: brew install colima"
+    return 1
+  fi
+  say "colima пробрасывает в свою VM только явно указанные папки, по умолчанию домашнюю."
+  set_colima_start "$workspace"
+  if ! colima_running; then
+    say "colima не запущена. Запусти её так, чтобы репозиторий был виден в VM:"
+    step "$(shell_line "${COLIMA_START[@]}")"
+    if confirm "Запустить сейчас?"; then
+      "${COLIMA_START[@]}" || true
+    else
+      pause "Выполни команду в другом терминале и нажми Enter"
+    fi
+  else
+    colima_sees_workspace "$workspace" || seen=$?
+    if (( seen == 1 )); then
+      colima_command stop
+      warn "$workspace не примонтирован в VM colima, контейнер увидит пустую папку."
+      say "Нужен перезапуск colima с этой папкой в mount:"
+      step "$(shell_line "${COLIMA_CMD[@]}") && $(shell_line "${COLIMA_START[@]}")"
+      running_containers=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')
+      warn "colima stop остановит все контейнеры в этой VM (сейчас запущено: $running_containers), не только opencode."
+      note "Если у тебя в colima свои mount, допиши их в команду: --mount заменяет весь список."
+      if confirm "Перезапустить colima сейчас?"; then
+        if "${COLIMA_CMD[@]}"; then "${COLIMA_START[@]}" || true; fi
+      else
+        pause "Выполни команду в другом терминале и нажми Enter"
+      fi
+    fi
+  fi
+  if ! colima_running || ! docker info >/dev/null 2>&1; then
+    warn "colima не отвечает. Запусти её командой выше и запусти визард снова."
+    return 1
+  fi
+  seen=0
+  colima_sees_workspace "$workspace" || seen=$?
+  case "$seen" in
+    0) say "✓ $workspace виден внутри VM colima" ;;
+    2) warn "в $workspace нет .git, поэтому проверить, виден ли он в VM colima, не могу." ;;
+    *)
+      warn "$workspace всё ещё не виден в VM colima. Перезапусти её командой выше и запусти визард снова."
+      return 1
+      ;;
+  esac
+}
+
 wait_until_ready() {
   local url="$1" waited=0 step_seconds=5
   printf '  ждём сервер'
@@ -302,9 +578,295 @@ wait_until_ready() {
   return 1
 }
 
+# Prints private keys in ~/.ssh (files whose first line is a PEM/OpenSSH private key header).
+ssh_private_keys() {
+  local file
+  for file in "$HOME"/.ssh/*; do
+    [[ -f "$file" && "$file" != *.pub ]] || continue
+    if head -n1 "$file" 2>/dev/null | grep -q -- '-----BEGIN .*PRIVATE KEY-----'; then
+      printf '%s\n' "$file"
+    fi
+  done
+}
+
+# Succeeds when the key opens with an empty passphrase. There is no ssh-agent in the
+# container, so a key with a passphrase can't be used there at all.
+key_has_no_passphrase() {
+  ssh-keygen -y -P "" -f "$1" </dev/null >/dev/null 2>&1
+}
+
+# Prints "host port" of an ssh git remote (ssh://[user@]host[:port]/path or the scp-like
+# [user@]host:path). Fails for https and local remotes. The host is validated because
+# it goes to ssh-keyscan as an argument.
+ssh_remote_host() {
+  local url="$1" authority host port=""
+  case "$url" in
+    ssh://* | git+ssh://* | ssh+git://*)
+      authority="${url#*://}"
+      authority="${authority%%/*}"
+      authority="${authority##*@}"
+      host="${authority%%:*}"
+      [[ "$authority" == *:* ]] && port="${authority#*:}"
+      ;;
+    *://*) return 1 ;;
+    *:*)
+      authority="${url%%:*}"
+      [[ "$authority" == */* ]] && return 1
+      host="${authority##*@}"
+      ;;
+    *) return 1 ;;
+  esac
+  port="${port:-22}"
+  [[ "$host" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && "$port" =~ ^[0-9]+$ ]] || return 1
+  printf '%s %s\n' "$host" "$port"
+}
+
+# Name of the repository's origin remote, or of its first remote when there is no origin.
+workspace_remote_name() {
+  local workspace="$1" remote
+  remote=$(git -C "$workspace" remote 2>/dev/null | grep -x origin || git -C "$workspace" remote 2>/dev/null | head -n1) || return 1
+  [[ -n "$remote" ]] || return 1
+  printf '%s' "$remote"
+}
+
+# Push URL of the remote workspace_remote_name picks.
+workspace_remote_url() {
+  local workspace="$1" remote
+  remote=$(workspace_remote_name "$workspace") || return 1
+  git -C "$workspace" remote get-url --push "$remote"
+}
+
+# Prints "hostname port user" as ssh resolves HOST with ~/.ssh/config applied (`ssh -G`).
+# Fails when ssh can't tell.
+ssh_resolved() {
+  local key value hostname="" port="" user=""
+  command -v ssh >/dev/null 2>&1 || return 1
+  while read -r key value; do
+    case "$key" in
+      hostname) hostname="$value" ;;
+      port) port="$value" ;;
+      user) user="$value" ;;
+    esac
+  done < <(ssh -G "$1" 2>/dev/null || true)
+  [[ -n "$hostname" ]] || return 1
+  printf '%s %s %s\n' "$hostname" "${port:-22}" "$user"
+}
+
+# Prints the remote URL spelled with the real host and port, for `git remote set-url`.
+# The user comes from the URL, else from FALLBACK_USER. Usage: URL HOST PORT FALLBACK_USER.
+explicit_remote_url() {
+  local url="$1" host="$2" port="$3" fallback_user="$4" scheme authority path user
+  case "$url" in
+    *://*) scheme="ssh"; authority="${url#*://}"; path="/${authority#*/}"; authority="${authority%%/*}" ;;
+    *) scheme="scp"; authority="${url%%:*}"; path="${url#*:}" ;;
+  esac
+  if [[ "$authority" == *@* ]]; then user="${authority%@*}"; else user="${fallback_user:-git}"; fi
+  if [[ "$scheme" == "scp" && "$port" == "22" ]]; then
+    printf '%s@%s:%s' "$user" "$host" "$path"
+    return
+  fi
+  [[ "$path" == /* ]] || path="/~/$path"
+  [[ "$scheme" == "ssh" && "$port" == "22" ]] && port=""
+  printf 'ssh://%s@%s%s%s' "$user" "$host" "${port:+:$port}" "$path"
+}
+
+# Prints the absolute, symlink-resolved path of a key typed by the user (relative paths are
+# taken from the current directory). Fails with a warning on characters that would break the
+# compose mount line or the container's ssh command.
+normalize_key_path() {
+  local path dir
+  path=$(expand_path "$1")
+  [[ "$path" == /* ]] || path="$PWD/$path"
+  dir=$(dirname "$path")
+  if [[ -d "$dir" ]]; then
+    path="$(cd "$dir" && pwd -P)/$(basename "$path")"
+  fi
+  case "$path" in
+    *\"* | *\\* | *\$* | *:* | *$'\n'*)
+      warn "в пути к ключу нельзя \" \\ \$ : и переводы строк, иначе он сломает mount: $path" >&2
+      return 1
+      ;;
+  esac
+  printf '%s' "$path"
+}
+
+# Interactive part of the "Git-доступ по SSH" stage. On success appends the key and
+# known_hosts mounts to extra_mounts and sets git_ssh_command; fails when the user skips.
+configure_git_ssh() {
+  local remote_url host_port host port keys key choice scan resolved real_host real_port real_user
+  if ! command -v git >/dev/null 2>&1 || ! command -v ssh-keyscan >/dev/null 2>&1; then
+    warn "на хосте нет git или ssh-keyscan, настроить push не получится"
+    return 1
+  fi
+  if ! remote_url=$(workspace_remote_url "$WORKSPACE"); then
+    warn "в $WORKSPACE нет git remote, пушить некуда"
+    return 1
+  fi
+  if ! host_port=$(ssh_remote_host "$remote_url"); then
+    warn "remote $remote_url не ssh. Пока поддержан только push по ssh."
+    return 1
+  fi
+  read -r host port <<< "$host_port"
+  if resolved=$(ssh_resolved "$host"); then
+    read -r real_host real_port real_user <<< "$resolved"
+    if [[ "$(printf '%s' "$real_host" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')" ]]; then
+      warn "$host — псевдоним из ~/.ssh/config (на самом деле $real_host:$real_port). В контейнере этого конфига нет."
+      warn "Remote через псевдоним не поддержан. Перепиши его на настоящий хост:"
+      step "git -C $WORKSPACE remote set-url $(workspace_remote_name "$WORKSPACE") $(explicit_remote_url "$remote_url" "$real_host" "$real_port" "$real_user")"
+      return 1
+    fi
+  fi
+  say "Remote: $remote_url (хост $host, порт $port)"
+
+  keys=$(ssh_private_keys)
+  if [[ -z "$keys" ]]; then
+    warn "в $HOME/.ssh нет приватных ключей. Создай deploy-ключ: ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_deploy"
+    return 1
+  fi
+  while true; do
+    printf '\n'
+    say "Приватные ключи в $HOME/.ssh:"
+    nl -w3 -s'. ' <<< "$keys" | while IFS= read -r line; do say "$line"; done
+    ask GIT_SSH_KEY "Номер или путь к ключу («-» — пропустить этот шаг):" || return 1
+    choice="${GIT_SSH_KEY:-}"
+    [[ "$choice" == "-" ]] && return 1
+    if [[ "$choice" =~ ^[0-9]+$ ]]; then
+      key=$(sed -n "${choice}p" <<< "$keys")
+    else
+      key="$choice"
+    fi
+    if [[ -z "$key" ]]; then
+      warn "ключа '$choice' нет"
+      continue
+    fi
+    key=$(normalize_key_path "$key") || continue
+    if [[ ! -f "$key" ]]; then
+      warn "ключа '$choice' нет"
+      continue
+    fi
+    if key_has_no_passphrase "$key"; then
+      break
+    fi
+    printf '\n'
+    warn "на ключе $key стоит passphrase."
+    warn "В контейнере нет ssh-agent, ввести её некому: push этим ключом не пройдёт."
+    say "Заведи отдельный deploy-ключ без passphrase и добавь его в GitLab/GitHub с правом записи:"
+    say "  ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_deploy"
+  done
+  write_env GIT_SSH_KEY "$key"
+
+  printf '\n'
+  step "ssh-keyscan $host:$port"
+  scan=$(ssh-keyscan -T 10 -p "$port" "$host" 2>/dev/null || true)
+  if [[ -z "$scan" ]]; then
+    warn "хост $host:$port не ответил на ssh-keyscan"
+    return 1
+  fi
+  say "Ключи хоста. Сверь fingerprint с опубликованным у провайдера (у GitHub и GitLab он"
+  say "есть в документации) или спроси у админа сервера:"
+  ssh-keygen -lf - <<< "$scan" | while IFS= read -r line; do step "$line"; done
+  if ! confirm "Fingerprint совпадает?"; then
+    warn "fingerprint не подтверждён, known_hosts не пишу"
+    return 1
+  fi
+  mkdir -p "$(dirname "$KNOWN_HOSTS_FILE")"
+  printf '%s\n' "$scan" > "$KNOWN_HOSTS_FILE"
+  say "✓ записал $KNOWN_HOSTS_FILE"
+
+  extra_mounts+=("$key:$CONTAINER_GIT_KEY" "$PWD/$KNOWN_HOSTS_FILE:$CONTAINER_KNOWN_HOSTS")
+  git_ssh_command="ssh -i $CONTAINER_GIT_KEY -o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile=$CONTAINER_KNOWN_HOSTS"
+}
+
+# write_override_file FILE MOUNT... writes the per-machine read-only mounts as a compose override.
+write_override_file() {
+  local file="$1" mount
+  shift
+  {
+    printf '# Generated by scripts/setup.sh. Per-machine read-only mounts.\n'
+    printf 'services:\n  opencode:\n    volumes:\n'
+    for mount in "$@"; do
+      printf '      - "%s:ro"\n' "$mount"
+    done
+  } > "$file"
+}
+
+# apply_override MOUNT... brings $OVERRIDE_FILE in line with the mounts. Returns 1 when the
+# user declined to overwrite an existing file, so the old file still stands.
+apply_override() {
+  if (( $# == 0 )); then
+    say "Дополнительных папок нет, $OVERRIDE_FILE не нужен."
+  elif [[ -f "$OVERRIDE_FILE" ]] && ! confirm "$OVERRIDE_FILE уже есть. Перезаписать?"; then
+    SKIPPED+=("$OVERRIDE_FILE оставлен как был; проверь, что в нём есть нужные папки")
+    return 1
+  else
+    write_override_file "$OVERRIDE_FILE" "$@"
+    say "✓ записал $OVERRIDE_FILE"
+  fi
+}
+
+# save_git_ssh_command COMMAND APPLIED writes GIT_SSH_COMMAND to ENV_FILE only when the
+# override with the key mounts was applied (APPLIED=1); otherwise the old value stays, so
+# .env never points git at a key the container doesn't have.
+save_git_ssh_command() {
+  local command="$1" applied="$2"
+  if [[ "$applied" == 1 ]]; then
+    write_env GIT_SSH_COMMAND "$command"
+  elif [[ "$command" != "$(_existing GIT_SSH_COMMAND || true)" ]]; then
+    SKIPPED+=("git push по SSH: изменение не применено, $OVERRIDE_FILE не перезаписан; запусти визард снова и согласись его перезаписать")
+  fi
+}
+
+# Dry-run push from inside the running container: the check behind "agent can push".
+# Not fatal, the result is only shown.
+check_git_push_from_container() {
+  local remote output line
+  remote=$(workspace_remote_name "$WORKSPACE") || return 0
+  step "git push --dry-run $remote HEAD из контейнера"
+  if output=$(docker compose exec -T opencode git -C "$WORKSPACE" push --dry-run "$remote" HEAD 2>&1); then
+    say "✓ push из контейнера проходит"
+  else
+    warn "push из контейнера не прошёл (визард на этом не останавливается):"
+    while IFS= read -r line; do note "  $line"; done <<< "$output"
+  fi
+}
+
+# Prints the name of the .venv volume of a repository: a readable tail of the path plus a
+# checksum of the whole path, so repositories with similar paths still get different volumes.
+venv_volume_name() {
+  local slug sum
+  slug=$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '-' | tr -s '-' | tr '[:upper:]' '[:lower:]')
+  slug="${slug#-}"; slug="${slug%-}"
+  slug="${slug: -40}"; slug="${slug#-}"
+  sum=$(printf '%s' "$1" | cksum | cut -d' ' -f1)
+  printf 'opencode-venv-%s-%s' "$slug" "$sum"
+}
+
+# Replaces the corporate apt setup in $APT_CONFIG_DIR with the files from SRC (a host
+# folder): *.sources, *.list, *.conf, *.crt. With no SRC only clears it. The Dockerfile
+# applies whatever lies there before the first apt-get. Fails when SRC has none of them.
+install_apt_config() {
+  local src="${1:-}" file copied=0
+  if [[ -n "$src" && ! -d "$src" ]]; then
+    warn "папки $src нет"
+    return 1
+  fi
+  find "$APT_CONFIG_DIR" -mindepth 1 -maxdepth 1 ! -name README.md -exec rm -rf {} +
+  [[ -n "$src" ]] || return 0
+  for file in "$src"/*.sources "$src"/*.list "$src"/*.conf "$src"/*.crt; do
+    [[ -f "$file" ]] || continue
+    cp "$file" "$APT_CONFIG_DIR/"
+    copied=$((copied + 1))
+  done
+  if (( copied == 0 )); then
+    warn "в $src нет ни *.sources, ни *.list, ни *.conf, ни *.crt"
+    return 1
+  fi
+  say "✓ скопировал в $APT_CONFIG_DIR файлов: $copied"
+}
+
 run_wizard() {
 
-TOTAL_STAGES=9
+TOTAL_STAGES=11
 
 cd "$(dirname "$0")/.."
 
@@ -313,18 +875,30 @@ banner "opencode в Docker: настройка и запуск"
 # ── 1 ─────────────────────────────────────────────────────────────────────
 stage "Проверка окружения"
 if ! command -v docker >/dev/null 2>&1; then
-  warn "docker не найден. Поставь Docker Desktop или OrbStack и запусти визард снова."
+  warn "docker не найден. Поставь Docker-движок и запусти визард снова. Рекомендую colima:"
+  note "  brew install colima docker docker-compose"
+  note "Подойдут и OrbStack или Docker Desktop."
   exit 1
 fi
 if ! docker compose version >/dev/null 2>&1; then
   warn "нет docker compose v2 (команда docker compose). Обнови Docker и запусти визард снова."
+  note "На colima: brew install docker-compose и подключи плагин, как скажет brew."
   exit 1
 fi
-if ! docker info >/dev/null 2>&1; then
-  warn "Docker-демон не отвечает. Запусти Docker Desktop или OrbStack и запусти визард снова."
+choose_engine
+engine_profile "$ENGINE" ""
+COLIMA_PROFILE=$(colima_profile)
+if docker info >/dev/null 2>&1; then
+  say "✓ движок: $ENGINE_TITLE"
+elif (( ENGINE_IS_COLIMA )); then
+  say "colima установлена, но не запущена. Команду запуска дам после выбора репозитория:"
+  say "ей нужен путь к нему, иначе контейнер его не увидит."
+else
+  warn "Docker-демон не отвечает. Запусти свой движок (colima, OrbStack, Docker Desktop) и запусти визард снова."
   exit 1
 fi
 say "✓ $(docker compose version)"
+write_env DOCKER_ENGINE "$ENGINE"
 
 HOST_OPENCODE_CONFIG="$HOME/.config/opencode"
 if [[ -d "$HOST_OPENCODE_CONFIG" ]]; then
@@ -369,8 +943,24 @@ while true; do
   warn "папки '$WORKSPACE' нет"
 done
 write_env WORKSPACE "$WORKSPACE"
+write_env VENV_VOLUME "$(venv_volume_name "$WORKSPACE")"
+# The container's own .venv volume is mounted over this directory. Without it Docker
+# creates the mount point itself, as root on Linux.
+if [[ ! -e "$WORKSPACE/.venv" ]]; then
+  mkdir -p "$WORKSPACE/.venv" || warn "не смог создать $WORKSPACE/.venv: создай её сам, иначе Docker сделает её от root"
+fi
 
 # ── 3 ─────────────────────────────────────────────────────────────────────
+stage "Репозиторий внутри движка"
+engine_profile "$ENGINE" "$WORKSPACE"
+if (( ENGINE_IS_COLIMA )); then
+  ensure_colima_workspace "$WORKSPACE" || exit 1
+else
+  while IFS= read -r line; do say "$line"; done <<< "$ENGINE_MOUNT_NOTE"
+fi
+pause "Enter, чтобы продолжить"
+
+# ── 4 ─────────────────────────────────────────────────────────────────────
 stage "Пароль сервера"
 say "Им браузер входит в веб-интерфейс (логин opencode)."
 if [[ -n "$(_existing OPENCODE_SERVER_PASSWORD || true)" ]] && ! confirm "Пароль уже задан. Сменить?"; then
@@ -388,7 +978,7 @@ else
 fi
 OPENCODE_SERVER_PASSWORD=$(_existing OPENCODE_SERVER_PASSWORD)
 
-# ── 4 ─────────────────────────────────────────────────────────────────────
+# ── 5 ─────────────────────────────────────────────────────────────────────
 stage "Порт, часовой пояс, время обновления"
 note "Enter без ввода берёт значение в квадратных скобках."
 while true; do
@@ -421,7 +1011,7 @@ while true; do
 done
 write_env OPENCODE_UPDATE_HOUR "$OPENCODE_UPDATE_HOUR"
 
-# ── 5 ─────────────────────────────────────────────────────────────────────
+# ── 6 ─────────────────────────────────────────────────────────────────────
 stage "Базовый образ и пакеты"
 say "Образ собирается из $DEFAULT_BASE_IMAGE. Если Docker Hub недоступен или тормозит,"
 say "можно взять Debian, который уже скачан локально."
@@ -430,7 +1020,7 @@ if docker image inspect "$DEFAULT_BASE_IMAGE" >/dev/null 2>&1; then
   say "✓ $DEFAULT_BASE_IMAGE уже есть локально"
   write_env BASE_IMAGE "$DEFAULT_BASE_IMAGE"
 elif [[ -n "$local_debian" ]]; then
-  say "Локально есть: $(printf '%s ' $local_debian)"
+  say "Локально есть: ${local_debian//$'\n'/ }"
   local_choice=$(printf '%s\n' "$local_debian" | grep -m1 -- '-slim$' || printf '%s\n' "$local_debian" | head -n1)
   if confirm "Собирать из локального $local_choice?"; then
     write_env BASE_IMAGE "$local_choice"
@@ -443,11 +1033,58 @@ else
 fi
 
 printf '\n'
-say "Тулчейн проекта ставится apt-пакетами в образ, например: build-essential python3-dev."
-say "uv и Python агент может поставить сам, они лягут в ~/.local и переживут перезапуски."
+say "В корпоративной сети deb.debian.org бывает закрыт, и пакеты идут через внутреннее"
+say "зеркало. Тогда укажи папку с его apt-настройками: *.sources или *.list, *.conf"
+say "(прокси, логин), *.crt. Визард скопирует их в $APT_CONFIG_DIR, подробности там в README.md."
 while true; do
-  ask EXTRA_APT_PACKAGES "Дополнительные apt-пакеты через пробел [$DEFAULT_APT_PACKAGES], «-» — без них:"
-  EXTRA_APT_PACKAGES="${EXTRA_APT_PACKAGES:-$DEFAULT_APT_PACKAGES}"
+  ask APT_CONFIG_SOURCE "Папка с apt-настройками зеркала, Enter — стандартный Debian, «-» — убрать:"
+  case "${APT_CONFIG_SOURCE:-}" in
+    "")
+      break
+      ;;
+    -)
+      APT_CONFIG_SOURCE=""
+      install_apt_config ""
+      break
+      ;;
+    *)
+      APT_CONFIG_SOURCE=$(expand_path "$APT_CONFIG_SOURCE")
+      install_apt_config "$APT_CONFIG_SOURCE" && break
+      ;;
+  esac
+done
+write_env APT_CONFIG_SOURCE "$APT_CONFIG_SOURCE"
+
+printf '\n'
+say "Питон-профиль: $PYTHON_PROFILE_APT_PACKAGES (gcc для сборки колёс) и uv прямо в образ."
+say "Системный питон не ставится: uv приносит свой при uv sync. У контейнера свой .venv"
+say "поверх WORKSPACE/.venv, хостовый он не видит и не трогает."
+default_packages=""
+python_saved=$(saved_python_profile_flag)
+if [[ "$python_saved" == 1 ]]; then
+  python_question="Оставить питон-профиль?"
+else
+  python_question="Это питон-проект? Включить питон-профиль?"
+fi
+if confirm_default "$python_saved" "$python_question"; then
+  write_env INSTALL_UV 1
+  default_packages="$PYTHON_PROFILE_APT_PACKAGES"
+  while true; do
+    ask UV_REGISTRY "Registry для образа uv [$DEFAULT_UV_REGISTRY], зеркало, если ghcr.io закрыт:"
+    UV_REGISTRY="${UV_REGISTRY:-$DEFAULT_UV_REGISTRY}"
+    [[ "$UV_REGISTRY" =~ ^[A-Za-z0-9][A-Za-z0-9.:/_-]*$ ]] && break
+    warn "registry: хост и путь, например nexus.example.corp:8443"
+  done
+  write_env UV_REGISTRY "$UV_REGISTRY"
+  say "Нативным зависимостям нужны dev-библиотеки: допиши их к профилю,"
+  say "например: $PYTHON_PROFILE_APT_PACKAGES libpq-dev libffi-dev. Сам визард их не угадывает."
+else
+  write_env INSTALL_UV 0
+  say "Тулчейн проекта ставится apt-пакетами в образ."
+fi
+while true; do
+  ask EXTRA_APT_PACKAGES "apt-пакеты через пробел [${default_packages:-без пакетов}], «-» — без них:"
+  EXTRA_APT_PACKAGES="${EXTRA_APT_PACKAGES:-$default_packages}"
   [[ "$EXTRA_APT_PACKAGES" == "-" ]] && EXTRA_APT_PACKAGES=""
   [[ "$EXTRA_APT_PACKAGES" =~ ^[a-z0-9.+:\ -]*$ ]] && break
   warn "имена apt-пакетов: строчные буквы, цифры и . + - :"
@@ -455,7 +1092,7 @@ done
 write_env EXTRA_APT_PACKAGES "$EXTRA_APT_PACKAGES"
 pause "Enter, чтобы продолжить"
 
-# ── 6 ─────────────────────────────────────────────────────────────────────
+# ── 7 ─────────────────────────────────────────────────────────────────────
 stage "Владелец файлов"
 if [[ "$(uname -s)" == "Linux" ]]; then
   say "На Linux контейнер должен работать под твоим UID и GID, иначе файлы в репозитории"
@@ -467,15 +1104,44 @@ else
 fi
 pause "Enter, чтобы продолжить"
 
-# ── 7 ─────────────────────────────────────────────────────────────────────
+# ── 8 ─────────────────────────────────────────────────────────────────────
+stage "Git-доступ по SSH"
+say "Чтобы агент мог пушить, в контейнер монтируется один выбранный ssh-ключ и known_hosts,"
+say "оба только на чтение. git ходит этим ключом через GIT_SSH_COMMAND, твой ~/.gitconfig"
+say "остаётся как есть."
+# Collected here and in the next stage; the next stage writes the mounts to $OVERRIDE_FILE
+# and only then GIT_SSH_COMMAND to .env.
+extra_mounts=()
+git_ssh_command=""
+if ! confirm_default "$(saved_git_ssh_flag)" "Настроить git push по SSH?"; then
+  say "пропускаю: агент сможет коммитить, но не пушить"
+elif ! configure_git_ssh; then
+  SKIPPED+=("git push по SSH: запусти визард снова, когда разберёшься с предупреждением выше")
+fi
+pause "Enter, чтобы продолжить"
+
+# ── 9 ─────────────────────────────────────────────────────────────────────
 stage "Дополнительные папки и симлинки"
 say "Конфиги монтируются только на чтение. Абсолютные симлинки в них работают, только если"
 say "их цель смонтирована по тому же пути. Соберу $OVERRIDE_FILE с нужными папками."
-extra_mounts=()
 scan_dirs=("$HOST_OPENCODE_CONFIG")
-if [[ -d "$HOME/.agents" ]] && confirm "Подключить $HOME/.agents (глобальные скиллы)?"; then
-  extra_mounts+=("$HOME/.agents:/home/opencode/.agents")
-  scan_dirs+=("$HOME/.agents")
+HOST_AGENTS_DIR="$HOME/.agents"
+if [[ ! -d "$HOST_AGENTS_DIR" ]]; then
+  while true; do
+    HOST_AGENTS_DIR=""
+    ask HOST_AGENTS_DIR "Папка с глобальными скиллами агента (обычно ~/.agents), Enter — нет такой, «-» — убрать:" || break
+    case "$HOST_AGENTS_DIR" in
+      "" | -) HOST_AGENTS_DIR=""; break ;;
+    esac
+    HOST_AGENTS_DIR=$(expand_path "$HOST_AGENTS_DIR")
+    [[ -d "$HOST_AGENTS_DIR" ]] && break
+    warn "папки $HOST_AGENTS_DIR нет"
+  done
+  write_env HOST_AGENTS_DIR "$HOST_AGENTS_DIR"
+fi
+if [[ -n "$HOST_AGENTS_DIR" ]] && confirm "Подключить $HOST_AGENTS_DIR (глобальные скиллы)?"; then
+  extra_mounts+=("$HOST_AGENTS_DIR:/home/opencode/.agents")
+  scan_dirs+=("$HOST_AGENTS_DIR")
 fi
 if [[ -d "$HOME/.config/git" ]] && confirm "Подключить $HOME/.config/git (глобальный gitignore)?"; then
   extra_mounts+=("$HOME/.config/git:/home/opencode/.config/git")
@@ -491,23 +1157,12 @@ else
   say "Абсолютных симлинков не нашёл."
 fi
 
-if (( ${#extra_mounts[@]} == 0 )); then
-  say "Дополнительных папок нет, $OVERRIDE_FILE не нужен."
-elif [[ -f "$OVERRIDE_FILE" ]] && ! confirm "$OVERRIDE_FILE уже есть. Перезаписать?"; then
-  SKIPPED+=("$OVERRIDE_FILE оставлен как был; проверь, что в нём есть нужные папки")
-else
-  {
-    printf '# Generated by scripts/setup.sh. Per-machine read-only mounts.\n'
-    printf 'services:\n  opencode:\n    volumes:\n'
-    for mount in "${extra_mounts[@]}"; do
-      printf '      - "%s:ro"\n' "$mount"
-    done
-  } > "$OVERRIDE_FILE"
-  say "✓ записал $OVERRIDE_FILE"
-fi
+override_applied=1
+apply_override ${extra_mounts[@]+"${extra_mounts[@]}"} || override_applied=0
+save_git_ssh_command "$git_ssh_command" "$override_applied"
 pause "Enter, чтобы продолжить"
 
-# ── 8 ─────────────────────────────────────────────────────────────────────
+# ── 10 ────────────────────────────────────────────────────────────────────
 stage "Сервисы на хосте"
 say "Внутри контейнера 127.0.0.1 и localhost означают сам контейнер. Если конфиг opencode"
 say "ходит в локальный прокси или MCP-сервер на хосте, порт надо пробросить на хост."
@@ -540,7 +1195,7 @@ fi
 write_env HOST_LOOPBACK_PORTS "$port_list"
 pause "Enter, чтобы продолжить"
 
-# ── 9 ─────────────────────────────────────────────────────────────────────
+# ── 11 ────────────────────────────────────────────────────────────────────
 stage "Сборка и запуск"
 server_url="http://localhost:$OPENCODE_PORT"
 say "Соберу образ и подниму контейнер. При первом запуске он скачивает opencode с npm,"
@@ -556,6 +1211,9 @@ else
     docker compose logs --tail 30 || true
     SKIPPED+=("запуск: смотри docker compose logs -f")
   else
+    if [[ "$(saved_git_ssh_flag)" == 1 ]]; then
+      check_git_push_from_container
+    fi
     say "Логин в браузере: opencode"
     if printf '%s' "$OPENCODE_SERVER_PASSWORD" | copy_to_clipboard 2>/dev/null; then
       say "Пароль скопирован в буфер обмена."

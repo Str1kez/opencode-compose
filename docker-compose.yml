@@ -4,9 +4,13 @@ services:
   opencode:
     build:
       context: .
+      dockerfile: docker/Dockerfile
       args:
         BASE_IMAGE: ${BASE_IMAGE:-debian:trixie-slim}
+        UV_REGISTRY: ${UV_REGISTRY:-ghcr.io}
         EXTRA_APT_PACKAGES: ${EXTRA_APT_PACKAGES:-}
+        INSTALL_UV: ${INSTALL_UV:-0}
+        WORKSPACE: ${WORKSPACE}
         OPENCODE_UID: ${OPENCODE_UID:-1000}
         OPENCODE_GID: ${OPENCODE_GID:-1000}
     image: opencode-server:local
@@ -24,6 +28,10 @@ services:
       OPENCODE_DISABLE_AUTOUPDATE: "true"
       TZ: ${TZ:-Europe/Moscow}
       HOST_LOOPBACK_PORTS: ${HOST_LOOPBACK_PORTS:-}
+      # The wizard points git at the mounted key and known_hosts (see docker-compose.override.yml).
+      # An env var instead of core.sshCommand: the host .gitconfig is mounted read-only and
+      # its include/includeIf targets may not exist in the container.
+      GIT_SSH_COMMAND: ${GIT_SSH_COMMAND:-ssh}
     # The repository is mounted at the same absolute path as on the host, so session
     # directories match between the host CLI and the server.
     working_dir: ${WORKSPACE:?set WORKSPACE in .env}
@@ -33,6 +41,12 @@ services:
         target: ${WORKSPACE}
         bind:
           create_host_path: false
+      # The host .venv is built for macOS and is useless in Linux; the container gets
+      # its own one at the standard path (ADR 0003). The mount point is an empty .venv
+      # directory in WORKSPACE on the host, created by the wizard (or by hand).
+      - type: volume
+        source: workspace-venv
+        target: ${WORKSPACE}/.venv
       - type: volume
         source: opencode-home
         target: /home/opencode
@@ -61,3 +75,7 @@ services:
 
 volumes:
   opencode-home:
+  # Named per repository (the wizard derives VENV_VOLUME from WORKSPACE), so switching
+  # WORKSPACE doesn't reuse another repository's venv.
+  workspace-venv:
+    name: ${VENV_VOLUME:-opencode-venv}
