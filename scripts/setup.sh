@@ -204,6 +204,9 @@ readonly WORKSPACE_PORT_FIRST=4097
 readonly WORKSPACE_PORT_COUNT=900
 # docker-compose.yml's `name:`, the project of every setup made before names were derived.
 readonly LEGACY_PROJECT_NAME="opencode"
+# The home volume every repository shared before it was derived per repository. Kept in
+# .env only as an explicit opt-in.
+readonly SHARED_HOME_VOLUME="opencode_opencode-home"
 readonly DEFAULT_UPDATE_HOUR=4
 readonly DEFAULT_BASE_IMAGE="debian:trixie-slim"
 readonly PYTHON_PROFILE_APT_PACKAGES="build-essential"
@@ -853,6 +856,10 @@ venv_volume_name() {
   printf 'opencode-venv-%s' "$(workspace_slug "$1")"
 }
 
+home_volume_name() {
+  printf 'opencode-home-%s' "$(workspace_slug "$1")"
+}
+
 compose_project_name() {
   printf 'opencode-%s' "$(workspace_slug "$1")"
 }
@@ -863,12 +870,17 @@ workspace_port() {
   printf '%s' $(( WORKSPACE_PORT_FIRST + $(path_checksum "$1") % WORKSPACE_PORT_COUNT ))
 }
 
-# Writes the compose project, the .venv volume and, for a new repository, its port to .env.
+# Writes the compose project, the .venv and home volumes and, for a new repository, its port
+# to .env. The home volume holds the opencode binary and ~/.local/bin, which the agent can
+# write: a home shared between repositories lets an agent in one plant code that runs in
+# another with that repository's deploy key. HOME_VOLUME stays shared only when it is set
+# to the shared name by hand.
 # A re-run on the same repository keeps the saved project and port. A setup made before
 # project names were derived runs as project `opencode`: renaming it would leave that
 # container running beside the new one on the same port.
 save_workspace_identity() {
-  local workspace="$1" saved_workspace="$2" project
+  local workspace="$1" saved_workspace="$2" project home_before
+  home_before=$(_existing HOME_VOLUME || true)
   if [[ "$workspace" == "$saved_workspace" ]]; then
     project=$(_existing COMPOSE_PROJECT_NAME || true)
     write_env COMPOSE_PROJECT_NAME "${project:-$LEGACY_PROJECT_NAME}"
@@ -877,6 +889,15 @@ save_workspace_identity() {
     write_env OPENCODE_PORT "$(workspace_port "$workspace")"
   fi
   write_env VENV_VOLUME "$(venv_volume_name "$workspace")"
+  if [[ "$home_before" == "$SHARED_HOME_VOLUME" ]]; then
+    write_env HOME_VOLUME "$SHARED_HOME_VOLUME"
+    return 0
+  fi
+  write_env HOME_VOLUME "$(home_volume_name "$workspace")"
+  if [[ -z "$home_before" && -n "$saved_workspace" ]]; then
+    note "Домашняя папка контейнера теперь своя у каждого репозитория: логин в провайдерах и загрузка opencode повторятся."
+    note "Чтобы оставить общую, пропиши в .env HOME_VOLUME=$SHARED_HOME_VOLUME. Риск: агент в одном репозитории сможет подложить код, который запустится в другом."
+  fi
 }
 
 # Replaces the corporate apt setup in $APT_CONFIG_DIR with the files from SRC (a host

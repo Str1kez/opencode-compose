@@ -90,8 +90,10 @@ services:
       retries: 3
 
 volumes:
-  # Shared by all repositories: one opencode login and one downloaded binary. The default is
-  # the name compose gave it when the project was always `opencode`, so that data stays.
+  # The wizard derives HOME_VOLUME per repository from WORKSPACE: the agent can write here
+  # (the opencode binary, ~/.local/bin), so a home shared between repositories lets an agent
+  # in one plant code that runs in another. The fallback below is the old shared home, for
+  # setups without the wizard; set HOME_VOLUME=opencode_opencode-home to opt in on purpose.
   opencode-home:
     name: ${HOME_VOLUME:-opencode_opencode-home}
   # Named per repository (the wizard derives VENV_VOLUME from WORKSPACE), so switching
