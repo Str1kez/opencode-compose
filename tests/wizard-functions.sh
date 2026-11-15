@@ -200,6 +200,46 @@ mkdir -p "$work/project"
 )
 pass "compose project: per repository, kept on re-run, legacy setup stays 'opencode'"
 
+# Home volume per repository: a prompt-injected agent must not plant binaries in a home that
+# another repository's container (with its own deploy key) runs from.
+mkdir -p "$work/home-volume"
+(
+  ENV_FILE="$work/home-volume/.env"
+  first_home=$(home_volume_name "/work/a-b/c")
+  [[ "$first_home" =~ ^opencode-home-[a-z0-9-]+$ ]] || fail "bad home volume name: $first_home"
+  [[ "$first_home" != "$(home_volume_name "/work/a/b-c")" ]] || fail "similar paths share a home volume"
+
+  save_workspace_identity "/work/a-b/c" "" > /dev/null
+  [[ "$(_existing HOME_VOLUME)" == "$first_home" ]] || fail "unset HOME_VOLUME was not derived"
+
+  save_workspace_identity "/work/a/b-c" "/work/a-b/c" > /dev/null
+  [[ "$(_existing HOME_VOLUME)" == "$(home_volume_name "/work/a/b-c")" ]] \
+    || fail "derived home of another workspace survived a workspace change"
+
+  write_env HOME_VOLUME "$SHARED_HOME_VOLUME" > /dev/null
+  save_workspace_identity "/work/a/b-c" "/work/a/b-c" > /dev/null
+  [[ "$(_existing HOME_VOLUME)" == "$SHARED_HOME_VOLUME" ]] || fail "explicit shared home was replaced"
+  save_workspace_identity "/work/a-b/c" "/work/a/b-c" > /dev/null
+  [[ "$(_existing HOME_VOLUME)" == "$SHARED_HOME_VOLUME" ]] || fail "explicit shared home lost on workspace change"
+
+  printf "WORKSPACE='/work/legacy'\n" > "$ENV_FILE"
+  out=$(save_workspace_identity "/work/legacy" "/work/legacy")
+  [[ "$(_existing HOME_VOLUME)" == "$(home_volume_name "/work/legacy")" ]] \
+    || fail "legacy setup with unset HOME_VOLUME was not moved to a derived home"
+  [[ "$out" == *"$SHARED_HOME_VOLUME"* && "$out" == *"docker volume rm"* ]] \
+    || fail "migration note missing the old shared volume hint: $out"
+
+  write_env HOME_VOLUME "my-home" > /dev/null
+  out=$(save_workspace_identity "/work/legacy" "/work/legacy")
+  [[ "$(_existing HOME_VOLUME)" == "$(home_volume_name "/work/legacy")" ]] \
+    || fail "hand-picked HOME_VOLUME was not replaced"
+  [[ "$out" == *my-home* ]] || fail "replacing a hand-picked HOME_VOLUME was silent: $out"
+
+  out=$(save_workspace_identity "/work/legacy" "/work/legacy")
+  [[ "$out" != *"$SHARED_HOME_VOLUME"* && "$out" != *my-home* ]] || fail "unchanged derived home printed a note: $out"
+)
+pass "home volume: per repository, explicit shared home kept, foreign derived name replaced"
+
 # colima refuses overlapping mounts: a WORKSPACE inside $HOME must not get a mount of its own.
 (
   HOME="/Users/someone"
