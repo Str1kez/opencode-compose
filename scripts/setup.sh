@@ -549,13 +549,16 @@ sh_quote() {
 }
 
 # Whether WORKSPACE inside the colima VM is the host folder and not an empty directory that
-# docker created on a previous bind of an unmounted path. Probes the repository marker
-# WORKSPACE/.git. Returns 0 seen, 1 not seen, 2 can't tell (no .git on the host).
+# docker created on a previous bind of an unmounted path. Probes one regular file of the
+# host folder: the folder may have no .git of its own, and a directory proves nothing,
+# since docker creates the directories of nested .venv mount points in the VM.
+# Returns 0 seen, 1 not seen, 2 can't tell (the host folder holds no file).
 # The probe goes to the VM's sh on stdin: lima versions differ in whether `colima ssh`
 # quotes its arguments, so a quoted argument is either right or quoted twice.
 colima_sees_workspace() {
-  local marker="$1/.git"
-  [[ -e "$marker" ]] || return 2
+  local marker
+  marker=$(find "$1" \( -name .venv -o -name node_modules \) -prune -o -type f -print -quit)
+  [[ -n "$marker" ]] || return 2
   printf 'test -e %s\n' "$(sh_quote "$marker")" \
     | colima ssh --profile "$COLIMA_PROFILE" -- sh >/dev/null 2>&1 || return 1
 }
@@ -630,7 +633,7 @@ ensure_colima_workspace() {
   colima_sees_workspace "$workspace" || seen=$?
   case "$seen" in
     0) say "✓ $workspace виден внутри VM colima" ;;
-    2) warn "в $workspace нет .git, поэтому проверить, виден ли он в VM colima, не могу." ;;
+    2) warn "в $workspace нет ни одного файла, поэтому проверить, видна ли она в VM colima, не могу." ;;
     *)
       warn "$workspace всё ещё не виден в VM colima. Перезапусти её командой выше и запусти визард снова."
       return 1
@@ -1055,6 +1058,20 @@ save_workspace_identity() {
   fi
 }
 
+# Prints a warning when the workspace folder is itself a git repository that holds nested
+# ones: opencode #51191 moves sessions started in a subfolder of a repository to its root.
+# Prints nothing for a single repository or for a plain folder of repositories.
+warn_nested_repositories() {
+  local workspace="$1"
+  [[ -e "$workspace/.git" ]] || return 0
+  # No -mindepth: it would skip the prune test on top-level node_modules and .venv.
+  find "$workspace" \( -name .git -o -name .venv -o -name node_modules \) -prune \
+    -name .git -print | grep -qvxF "$workspace/.git" || return 0
+  warn "$workspace сам git-репозиторий, и внутри есть вложенные репозитории."
+  note "Из-за бага opencode #51191 сессии из подпапки уедут в корень репозитория."
+  note "Сделай рабочей папкой родителя без собственного .git или вынеси вложенные репозитории."
+}
+
 # Replaces the corporate apt setup in $APT_CONFIG_DIR with the files from SRC (a host
 # folder): *.sources, *.list, *.conf, *.crt. With no SRC only clears it. The Dockerfile
 # applies whatever lies there before the first apt-get. Fails when SRC has none of them.
@@ -1105,7 +1122,7 @@ COLIMA_PROFILE=$(colima_profile)
 if docker info >/dev/null 2>&1; then
   say "✓ движок: $ENGINE_TITLE"
 elif (( ENGINE_IS_COLIMA )); then
-  say "colima установлена, но не запущена. Команду запуска дам после выбора репозитория:"
+  say "colima установлена, но не запущена. Команду запуска дам после выбора рабочей папки:"
   say "ей нужен путь к нему, иначе контейнер его не увидит."
 else
   warn "Docker-демон не отвечает. Запусти свой движок (colima, OrbStack, Docker Desktop) и запусти визард снова."
@@ -1144,15 +1161,20 @@ fi
 pause "Enter, чтобы продолжить"
 
 # ── 2 ─────────────────────────────────────────────────────────────────────
-stage "Рабочий репозиторий"
-say "Папка, в которой opencode будет работать. Контейнер видит её на запись"
-say "по тому же абсолютному пути, что и на хосте."
+stage "Рабочая папка"
+say "Папка, в которой opencode будет работать: один репозиторий или папка с несколькими."
+say "Контейнер видит её на запись по тому же абсолютному пути, что и на хосте."
+say "Бери самую узкую папку: только репозитории одного уровня доверия, без личных"
+say "файлов, dotfiles и чужих проектов."
+warn "Внутри рабочей папки изоляции между репозиториями нет: агент из одного пишет в код,"
+note ".git и читает ключи остальных. Разный уровень доверия разводится только разными"
+note "рабочими папками, то есть разными контейнерами."
 saved_workspace=$(_existing WORKSPACE || true)
 if [[ -n "$saved_workspace" && -d "$saved_workspace" ]]; then
   saved_workspace=$(cd "$saved_workspace" && pwd -P)
 fi
 while true; do
-  ask WORKSPACE "Путь к репозиторию:"
+  ask WORKSPACE "Путь к рабочей папке:"
   WORKSPACE=$(expand_path "${WORKSPACE:-}")
   if [[ -n "$WORKSPACE" && -d "$WORKSPACE" ]]; then
     WORKSPACE=$(cd "$WORKSPACE" && pwd -P)
@@ -1160,11 +1182,12 @@ while true; do
   fi
   warn "папки '$WORKSPACE' нет"
 done
+warn_nested_repositories "$WORKSPACE"
 write_env WORKSPACE "$WORKSPACE"
 save_workspace_identity "$WORKSPACE" "$saved_workspace"
 
 # ── 3 ─────────────────────────────────────────────────────────────────────
-stage "Репозиторий внутри движка"
+stage "Рабочая папка внутри движка"
 engine_profile "$ENGINE" "$WORKSPACE"
 if (( ENGINE_IS_COLIMA )); then
   ensure_colima_workspace "$WORKSPACE" || exit 1
