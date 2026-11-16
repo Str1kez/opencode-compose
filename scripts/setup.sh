@@ -921,8 +921,11 @@ configure_git_ssh() {
     warn "ни один хост не попал в known_hosts, $KNOWN_HOSTS_FILE не трогаю"
     return 1
   fi
-  mkdir -p "$(dirname "$KNOWN_HOSTS_FILE")"
-  cat "$planned" > "$KNOWN_HOSTS_FILE"
+  if ! { mkdir -p "$(dirname "$KNOWN_HOSTS_FILE")" && cat "$planned" > "$KNOWN_HOSTS_FILE"; }; then
+    rm -f "$planned"
+    warn "не смог записать $KNOWN_HOSTS_FILE"
+    return 1
+  fi
   rm -f "$planned"
   say "✓ записал $KNOWN_HOSTS_FILE"
 
@@ -977,7 +980,7 @@ write_override_file() {
 
 # apply_override MOUNT... brings $OVERRIDE_FILE in line with the mounts and VENV_OVERLAYS.
 # An up-to-date file is left as is without a question. Returns 1 when the user declined to
-# overwrite an existing file, so the old file still stands.
+# overwrite an existing file, so the old file still stands, or when it couldn't be written.
 apply_override() {
   local planned
   if (( $# == 0 && ${#VENV_OVERLAYS[@]} == 0 )); then
@@ -985,7 +988,11 @@ apply_override() {
     return 0
   fi
   planned=$(mktemp)
-  write_override_file "$planned" "$@"
+  if ! write_override_file "$planned" "$@"; then
+    rm -f "$planned"
+    warn "не смог собрать $OVERRIDE_FILE"
+    return 1
+  fi
   if [[ -f "$OVERRIDE_FILE" ]] && cmp -s "$planned" "$OVERRIDE_FILE"; then
     say "✓ $OVERRIDE_FILE уже такой, как нужно"
   elif [[ -f "$OVERRIDE_FILE" ]] && ! confirm "$OVERRIDE_FILE уже есть. Перезаписать?"; then
@@ -995,8 +1002,11 @@ apply_override() {
       SKIPPED+=("в старом $OVERRIDE_FILE может не быть .venv-volume части питон-репозиториев: контейнерный uv sync перезапишет их хостовый .venv")
     fi
     return 1
+  elif ! cat "$planned" > "$OVERRIDE_FILE"; then
+    rm -f "$planned"
+    warn "не смог записать $OVERRIDE_FILE"
+    return 1
   else
-    cat "$planned" > "$OVERRIDE_FILE"
     say "✓ записал $OVERRIDE_FILE"
   fi
   rm -f "$planned"
@@ -1060,11 +1070,11 @@ workspace_slug() {
   printf '%s-%s' "$slug" "$(path_checksum "${2:-$1}")"
 }
 
-# venv_volume_name WORKSPACE [PROJECT] names the volume over PROJECT/.venv (WORKSPACE itself
-# by default). The checksum covers the workspace too: a project seen from two overlapping
-# workspaces gets two volumes, and their containers share no executables.
+# venv_volume_name WORKSPACE PROJECT names the volume over PROJECT/.venv. The checksum covers
+# the workspace too: a project seen from two overlapping workspaces gets two volumes, and
+# their containers share no executables.
 venv_volume_name() {
-  local workspace="$1" project="${2:-$1}"
+  local workspace="$1" project="$2"
   printf 'opencode-venv-%s' "$(workspace_slug "$project" "$workspace"$'\n'"$project")"
 }
 
@@ -1140,7 +1150,7 @@ save_workspace_identity() {
     write_env COMPOSE_PROJECT_NAME "$(compose_project_name "$workspace")"
     write_env OPENCODE_PORT "$(workspace_port "$workspace")"
   fi
-  # The .venv volumes are per python project now and live in $OVERRIDE_FILE.
+  # The .venv volumes, one per python project, live in $OVERRIDE_FILE: compose reads no VENV_VOLUME.
   drop_env VENV_VOLUME
   if [[ "$home_before" == "$SHARED_HOME_VOLUME" ]]; then
     write_env HOME_VOLUME "$SHARED_HOME_VOLUME"

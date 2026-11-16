@@ -13,9 +13,8 @@ work=$(cd "$(mktemp -d "${TMPDIR:-/tmp}/wizard-functions.XXXXXX")" && pwd -P)
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok: $*"; }
 
-awk '/^run_wizard\(\) \{/ { exit } { print }' "$repo_root/scripts/setup.sh" > "$work/wizard-lib.sh"
-# shellcheck source=/dev/null
-source "$work/wizard-lib.sh"
+# shellcheck source=tests/load-wizard-lib.sh
+source "$repo_root/tests/load-wizard-lib.sh"
 
 # Re-run defaults (spec US19): Enter keeps what an earlier run saved.
 mkdir -p "$work/rerun"
@@ -186,8 +185,8 @@ mkdir -p "$work/nogit"
 rc=0
 colima_sees_workspace "$work/nogit" || rc=$?
 [[ "$rc" == 2 ]] || fail "workspace without .git must be reported as unverifiable (got $rc)"
-first=$(venv_volume_name "/work/a-b/c")
-second=$(venv_volume_name "/work/a/b-c")
+first=$(venv_volume_name "/work/a-b/c" "/work/a-b/c")
+second=$(venv_volume_name "/work/a/b-c" "/work/a/b-c")
 [[ "$first" != "$second" ]] || fail "similar paths share a venv volume"
 [[ "$first" =~ ^opencode-venv-[a-z0-9-]+$ ]] || fail "bad volume name: $first"
 pass "helpers: sh_quote, unverifiable mount, per-path venv volume"
@@ -365,7 +364,7 @@ done <<< "$names"
   || fail "one project seen from two workspaces shares a venv volume"
 
 prepare_venv_overlays "$single" > /dev/null
-[[ "${VENV_OVERLAYS[*]}" == "$(venv_volume_name "$single") $single/.venv" ]] \
+[[ "${VENV_OVERLAYS[*]}" == "$(venv_volume_name "$single" "$single") $single/.venv" ]] \
   || fail "workspace as one python repository: ${VENV_OVERLAYS[*]}"
 
 mkdir -p "$work/python-ws/none"

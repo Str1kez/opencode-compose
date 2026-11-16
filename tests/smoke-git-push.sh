@@ -44,10 +44,8 @@ trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok: $*"; }
 
-# The wizard's helpers: everything in setup.sh above run_wizard.
-awk '/^run_wizard\(\) \{/ { exit } { print }' "$repo_root/scripts/setup.sh" > "$work/wizard-lib.sh"
-# shellcheck source=/dev/null
-source "$work/wizard-lib.sh"
+# shellcheck source=tests/load-wizard-lib.sh
+source "$repo_root/tests/load-wizard-lib.sh"
 
 mkdir -p "$work/home/.ssh" "$work/opencode-config"
 ssh-keygen -q -t ed25519 -N '' -C smoke-deploy -f "$work/home/.ssh/id_deploy"
