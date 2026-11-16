@@ -298,6 +298,7 @@ pass "apt config: apt files copied, old set replaced, README kept"
 # colima mount probe: lima 2.x quotes `colima ssh` arguments itself, so a path quoted by the
 # wizard was quoted twice and an existing repository read as "not mounted".
 mkdir -p "$work/colima ws/it's/.git"
+touch "$work/colima ws/it's/.git/HEAD"
 (
   # shellcheck disable=SC2034  # read by colima_sees_workspace from wizard-lib.sh
   COLIMA_PROFILE=default
@@ -311,3 +312,55 @@ mkdir -p "$work/colima ws/it's/.git"
   colima_sees_workspace "$work/colima ws/it's" || fail "existing workspace reported as not mounted (rc $?)"
 )
 pass "colima probe: path with a space and a quote is found through a quoting colima ssh"
+
+# Workspace folder (ADR 0005): a folder that is itself a repository and holds nested ones gets
+# the opencode #51191 warning; a single repository and a plain folder of repositories don't.
+mkdir -p "$work/ws-nested/.git" "$work/ws-nested/libs/inner/.git" \
+  "$work/ws-single/.git" "$work/ws-single/node_modules/pkg/.git" \
+  "$work/ws-folder/a/.git" "$work/ws-folder/b/.git"
+(
+  out=$(warn_nested_repositories "$work/ws-nested")
+  [[ "$out" == *"#51191"* ]] || fail "repository with nested repositories: no #51191 warning"
+  [[ -z "$(warn_nested_repositories "$work/ws-single")" ]] \
+    || fail "single repository (git dirs only under node_modules) got a warning"
+  [[ -z "$(warn_nested_repositories "$work/ws-folder")" ]] \
+    || fail "folder of repositories that is not a repository got a warning"
+)
+pass "workspace folder: #51191 warning only for a repository with nested repositories"
+
+# colima mount probe for a workspace folder that is not a repository (ADR 0005): the marker is
+# a regular file of the folder; 0 when the VM sees it, 1 when the VM has only the directories
+# docker created there for the .venv mount points, 2 when the folder holds no file at all.
+mkdir -p "$work/folder-seen/it's a repo" "$work/folder-unseen/.venv" "$work/folder-unseen/other/.venv" \
+  "$work/folder-empty/repo/.venv"
+touch "$work/folder-seen/it's a repo/README" "$work/folder-unseen/other/pyproject.toml"
+(
+  # shellcheck disable=SC2034  # read by colima_sees_workspace from wizard-lib.sh
+  COLIMA_PROFILE=default
+  vm_hides=""
+  colima() {
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    local script
+    script=$(cat)
+    # Under the hidden folder the VM holds only what docker created for bind mount points:
+    # the directories, never a file.
+    if [[ -n "$vm_hides" ]]; then
+      script=${script/test -e /test -d }
+    fi
+    sh -c "$script"
+  }
+  rc=0
+  colima_sees_workspace "$work/folder-seen" || rc=$?
+  [[ "$rc" == 0 ]] || fail "folder of repositories without .git, visible in the VM: got $rc"
+
+  vm_hides="$work/folder-unseen"
+  rc=0
+  colima_sees_workspace "$work/folder-unseen" || rc=$?
+  [[ "$rc" == 1 ]] || fail "folder of repositories without .git, hidden from the VM: got $rc"
+
+  rc=0
+  colima_sees_workspace "$work/folder-empty" || rc=$?
+  [[ "$rc" == 2 ]] || fail "workspace folder with no file must be unverifiable: got $rc"
+)
+pass "colima probe: workspace folder without .git is checked by a file, not a mount point"
