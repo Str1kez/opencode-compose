@@ -622,3 +622,44 @@ mkdir -p "$sp/svc/api" "$sp/lib" "$work/summary-none"
   [[ -n "$(show_python_projects "$work/summary-none")" ]] || fail "summary without python projects is silent"
 )
 pass "summary: python projects listed again at the end"
+
+# The harness checkout must not overlap the workspace folder: the agent writes the whole
+# folder, and the harness holds the compose files, scripts/setup.sh, known_hosts and .env that
+# the host runs on the next `up`. Compared by resolved path, with a trailing slash, so a
+# sibling that shares a prefix is fine.
+hw="$work/harness-overlap"
+mkdir -p "$hw/harness/docker" "$hw/harness-b"
+ln -s "$hw" "$work/harness-link"
+: > "$hw/.env"
+(
+  ENV_FILE="$hw/.env"
+  choose_workspace "$hw/harness" > "$hw/log" 2>&1 \
+    <<< "$work/harness-link"$'\n'"$hw"$'\n'"$hw/harness"$'\n'"$hw/harness/docker"$'\n'"$hw/harness-b"
+  [[ "$WORKSPACE" == "$hw/harness-b" ]] || fail "workspace next to the harness not accepted: $WORKSPACE"
+  [[ "$(grep -c 'вложены друг в друга' "$hw/log")" == 4 ]] || { cat "$hw/log"; fail "overlapping workspaces not all refused"; }
+)
+pass "workspace folder: refused when it holds the harness or lies inside it"
+
+# The deploy key must not lie in the workspace folder either, not even behind a symlink: the
+# agent would swap it for a link to any host file, which the next `up` mounts into the container.
+ki="$work/key-inside"
+mkdir -p "$ki/elsewhere"
+ssh-keygen -q -t ed25519 -N '' -f "$kh/ws/id_inside"
+ln -s "$kh/ws/id_inside" "$ki/elsewhere/id_link"
+(
+  cd "$ki"
+  HOME="$kh/home"
+  ENV_FILE="$ki/.env"
+  # shellcheck disable=SC2034  # read by configure_git_ssh from wizard-lib.sh
+  WORKSPACE="$kh/ws"
+  ssh() { command ssh -F /dev/null "$@"; }
+  ssh-keyscan() { printf '%s\n' "$*" >> "$ki/scans"; }
+  if configure_git_ssh > "$ki/log" 2>&1 <<< "$kh/ws/id_inside"$'\n'"$ki/elsewhere/id_link"$'\n-'; then
+    fail "key inside the workspace folder was accepted"
+  fi
+  [[ "$(grep -c 'лежит в рабочей папке' "$ki/log")" == 2 ]] || { cat "$ki/log"; fail "key inside the workspace not refused twice"; }
+  [[ -z "$(_existing GIT_SSH_KEY || true)" ]] || fail "key inside the workspace saved to .env"
+  [[ ! -e "$ki/scans" ]] || fail "key inside the workspace got as far as ssh-keyscan"
+)
+rm "$kh/ws/id_inside" "$kh/ws/id_inside.pub"
+pass "git ssh: key inside the workspace folder refused, directly and through a symlink"

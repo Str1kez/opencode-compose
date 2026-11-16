@@ -769,6 +769,55 @@ normalize_key_path() {
   printf '%s' "$path"
 }
 
+# Prints an absolute PATH with every symlink resolved, the last component included.
+resolved_path() {
+  local path="$1" target hops=0
+  while [[ -L "$path" ]] && (( hops < 40 )); do
+    target=$(readlink "$path")
+    [[ "$target" == /* ]] || target="$(dirname "$path")/$target"
+    path="$target"
+    hops=$((hops + 1))
+  done
+  if [[ -d "$(dirname "$path")" ]]; then
+    path="$(cd "$(dirname "$path")" && pwd -P)/$(basename "$path")"
+  fi
+  printf '%s' "$path"
+}
+
+# path_inside PATH DIR: PATH is DIR or lies under it. Both resolved; the trailing slash keeps
+# /w/a-b out of /w/a.
+path_inside() {
+  local path="${1%/}" dir="${2%/}"
+  [[ "$path/" == "$dir/"* ]]
+}
+
+paths_overlap() {
+  path_inside "$1" "$2" || path_inside "$2" "$1"
+}
+
+# choose_workspace HARNESS asks for the workspace folder until it gets an existing one that
+# doesn't overlap HARNESS (the resolved harness checkout) and sets WORKSPACE to its resolved
+# path. The agent writes the whole workspace folder; the harness holds the compose files,
+# scripts/setup.sh, known_hosts and .env, which the host runs or reads on the next `up`.
+choose_workspace() {
+  local harness="$1"
+  while true; do
+    ask WORKSPACE "Путь к рабочей папке:" || return 1
+    WORKSPACE=$(expand_path "${WORKSPACE:-}")
+    if [[ -z "$WORKSPACE" || ! -d "$WORKSPACE" ]]; then
+      warn "папки '$WORKSPACE' нет"
+      continue
+    fi
+    WORKSPACE=$(cd "$WORKSPACE" && pwd -P)
+    if paths_overlap "$WORKSPACE" "$harness"; then
+      warn "$WORKSPACE и харнесс $harness вложены друг в друга. Агент перепишет compose-файлы"
+      warn "и скрипты харнесса и прочитает его .env, а следующий up выполнит это на хосте."
+      continue
+    fi
+    return 0
+  done
+}
+
 lowercase() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
@@ -868,6 +917,11 @@ configure_git_ssh() {
     key=$(normalize_key_path "$key") || continue
     if [[ ! -f "$key" ]]; then
       warn "ключа '$choice' нет"
+      continue
+    fi
+    if path_inside "$(resolved_path "$key")" "$WORKSPACE"; then
+      warn "ключ $key лежит в рабочей папке: агент подменит его ссылкой на любой файл хоста,"
+      warn "и следующий up смонтирует тот файл в контейнер. Положи ключ вне рабочей папки."
       continue
     fi
     if key_has_no_passphrase "$key"; then
@@ -1276,19 +1330,13 @@ say "файлов, dotfiles и чужих проектов."
 warn "Внутри рабочей папки изоляции между репозиториями нет: агент из одного пишет в код,"
 note ".git и читает ключи остальных. Разный уровень доверия разводится только разными"
 note "рабочими папками, то есть разными контейнерами."
+note "Харнесс (папка с этим визардом) не может лежать в рабочей папке, и рабочая папка в нём"
+note "тоже: агент переписал бы его compose-файлы и скрипты."
 saved_workspace=$(_existing WORKSPACE || true)
 if [[ -n "$saved_workspace" && -d "$saved_workspace" ]]; then
   saved_workspace=$(cd "$saved_workspace" && pwd -P)
 fi
-while true; do
-  ask WORKSPACE "Путь к рабочей папке:"
-  WORKSPACE=$(expand_path "${WORKSPACE:-}")
-  if [[ -n "$WORKSPACE" && -d "$WORKSPACE" ]]; then
-    WORKSPACE=$(cd "$WORKSPACE" && pwd -P)
-    break
-  fi
-  warn "папки '$WORKSPACE' нет"
-done
+choose_workspace "$(pwd -P)"
 warn_nested_repositories "$WORKSPACE"
 write_env WORKSPACE "$WORKSPACE"
 save_workspace_identity "$WORKSPACE" "$saved_workspace"
