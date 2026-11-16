@@ -663,3 +663,21 @@ ln -s "$kh/ws/id_inside" "$ki/elsewhere/id_link"
 )
 rm "$kh/ws/id_inside" "$kh/ws/id_inside.pub"
 pass "git ssh: key inside the workspace folder refused, directly and through a symlink"
+
+# .venv volume names are global (`name:`), and the agent picks the project paths: with a CRC
+# suffix a project in one workspace folder could forge the volume of another's and mount its
+# .venv. The pair below collides under cksum. Home volume and compose project keep their names
+# byte for byte: the user picks their path, and a rename would drop logins and orphan containers.
+trusted=$(venv_volume_name /work/trusted /work/trusted/payments-service-with-long-name)
+forged=$(venv_volume_name /work/playground \
+  /work/playground/aabbbbabbbbbabbaabababaaabaabaabaaaaaaaa/trusted-payments-service-with-long-name)
+[[ "$trusted" != "$forged" ]] || fail "forged project path took another workspace's venv volume: $forged"
+[[ "$trusted" =~ ^opencode-venv-trusted-payments-service-with-long-name-[0-9a-f]{16}$ ]] \
+  || fail "venv volume name lost its readable tail or hash: $trusted"
+[[ "$(home_volume_name /Users/someone/Documents/developer/work/my-repos)" \
+  == "opencode-home-omeone-documents-developer-work-my-repos-2554644389" ]] \
+  || fail "home volume name changed: $(home_volume_name /Users/someone/Documents/developer/work/my-repos)"
+[[ "$(compose_project_name /Users/someone/Documents/developer/work/my-repos)" \
+  == "opencode-omeone-documents-developer-work-my-repos-2554644389" ]] \
+  || fail "compose project name changed"
+pass "venv volume: forged CRC collision gets its own volume, home and project names unchanged"

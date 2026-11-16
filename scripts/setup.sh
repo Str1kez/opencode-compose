@@ -220,6 +220,8 @@ readonly UV_PIP_INDEX_URL_PATTERN='^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9
 readonly KNOWN_HOSTS_FILE=".git-ssh/known_hosts"
 readonly CONTAINER_GIT_KEY="/run/git-ssh/id"
 readonly CONTAINER_KNOWN_HOSTS="/run/git-ssh/known_hosts"
+# Hex digits of sha256 in a .venv volume name: 64 bits, out of reach of a forged collision.
+readonly VENV_HASH_LENGTH=16
 # "VOLUME TARGET" per python project, filled by prepare_venv_overlays, written by
 # write_override_file.
 VENV_OVERLAYS=()
@@ -1114,29 +1116,53 @@ path_checksum() {
   printf '%s' "$1" | cksum | cut -d' ' -f1
 }
 
-# workspace_slug PATH [KEY] prints a name suffix: a readable tail of PATH plus a checksum of
-# KEY (the whole PATH by default), so similar paths still get different names.
-workspace_slug() {
+# sha256_hex prints the sha256 of stdin in hex: sha256sum on Linux, shasum on macOS. Fails
+# when the host has neither.
+sha256_hex() {
+  local digest
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest=$(sha256sum)
+  elif command -v shasum >/dev/null 2>&1; then
+    digest=$(shasum -a 256)
+  else
+    return 1
+  fi
+  printf '%s' "${digest%% *}"
+}
+
+# path_tail PATH prints the readable part of a name: the tail of PATH in lowercase letters,
+# digits and dashes.
+path_tail() {
   local slug
   slug=$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '-' | tr -s '-' | tr '[:upper:]' '[:lower:]')
   slug="${slug#-}"; slug="${slug%-}"
   slug="${slug: -40}"; slug="${slug#-}"
-  printf '%s-%s' "$slug" "$(path_checksum "${2:-$1}")"
+  printf '%s' "$slug"
 }
 
-# venv_volume_name WORKSPACE PROJECT names the volume over PROJECT/.venv. The checksum covers
-# the workspace too: a project seen from two overlapping workspaces gets two volumes, and
-# their containers share no executables.
+# workspace_slug PATH prints a name suffix: a readable tail of PATH plus its checksum, so
+# similar paths still get different names.
+workspace_slug() {
+  printf '%s-%s' "$(path_tail "$1")" "$(path_checksum "$1")"
+}
+
+# venv_volume_name WORKSPACE PROJECT names the volume over PROJECT/.venv. The hash covers the
+# workspace too: a project seen from two overlapping workspaces gets two volumes, and their
+# containers share no executables. A hash, not the checksum: the names are global and the
+# agent picks the project paths, and a CRC collision is forged in milliseconds, which would
+# mount another workspace's .venv. Fails without a sha256 tool.
 venv_volume_name() {
-  local workspace="$1" project="$2"
-  printf 'opencode-venv-%s' "$(workspace_slug "$project" "$workspace"$'\n'"$project")"
+  local workspace="$1" project="$2" hash
+  hash=$(printf '%s\n%s' "$workspace" "$project" | sha256_hex) || return 1
+  (( ${#hash} >= VENV_HASH_LENGTH )) || return 1
+  printf 'opencode-venv-%s-%s' "$(path_tail "$project")" "${hash:0:VENV_HASH_LENGTH}"
 }
 
 # prepare_venv_overlays WORKSPACE fills VENV_OVERLAYS with "VOLUME TARGET" for the .venv of
 # every top python project, creates a missing host .venv as the mount point (otherwise
 # Docker creates it, as root on Linux) and prints the projects with the re-run warning.
 prepare_venv_overlays() {
-  local workspace="$1" project
+  local workspace="$1" project volume
   VENV_OVERLAYS=()
   while IFS= read -r project; do
     # A path with a newline arrives in pieces that are no project.
@@ -1144,7 +1170,11 @@ prepare_venv_overlays() {
     if [[ ! -e "$project/.venv" ]]; then
       mkdir "$project/.venv" || warn "не смог создать $project/.venv: создай её сам, иначе Docker сделает её от root"
     fi
-    VENV_OVERLAYS+=("$(venv_volume_name "$workspace" "$project") $project/.venv")
+    if ! volume=$(venv_volume_name "$workspace" "$project"); then
+      warn "на хосте нет ни sha256sum, ни shasum: не могу назвать .venv-volume для $project"
+      return 1
+    fi
+    VENV_OVERLAYS+=("$volume $project/.venv")
   done < <(python_projects "$workspace")
   show_python_projects "$workspace"
   warn "появился новый питон-проект — перезапусти визард. Без этого у него нет своего"
