@@ -313,6 +313,102 @@ touch "$work/colima ws/it's/.git/HEAD"
 )
 pass "colima probe: path with a space and a quote is found through a quoting colima ssh"
 
+# Python projects in a workspace folder (ADR 0003 after ADR 0005): every top pyproject.toml at
+# any depth gets its own .venv overlay, a subproject under another pyproject.toml doesn't, and
+# .git, .venv and node_modules stay out of the walk. a and a-b sort around a/ in byte order,
+# which once let a/nested slip past the nested-path filter.
+ws="$work/python-ws/ws"
+mkdir -p "$ws/a/nested" "$ws/a-b" "$ws/deep/x/y/svc" "$ws/mono/packages/api" "$ws/plain/src" \
+  "$ws/plain/.git/hooks" "$ws/plain/.venv/lib" "$ws/plain/node_modules/pkg" "$ws/frontend/.git"
+for project in a a/nested a-b deep/x/y/svc mono/packages/api \
+  plain/.git/hooks plain/.venv/lib plain/node_modules/pkg; do
+  : > "$ws/$project/pyproject.toml"
+done
+: > "$ws/plain/.git/HEAD"
+: > "$ws/frontend/.git/HEAD"
+found=$(python_projects "$ws" | LC_ALL=C sort | tr '\n' ' ')
+[[ "$found" == "$ws/a $ws/a-b $ws/deep/x/y/svc $ws/mono/packages/api " ]] \
+  || fail "python projects: got '$found'"
+repos=$(workspace_dirs_with "$ws" .git | tr '\n' ' ')
+[[ "$repos" == "$ws/frontend $ws/plain " ]] || fail "repositories: got '$repos'"
+
+single="$work/python-ws/single"
+mkdir -p "$single/tools/sub"
+: > "$single/pyproject.toml"
+: > "$single/tools/sub/pyproject.toml"
+[[ "$(python_projects "$single")" == "$single" ]] || fail "workspace as one python repository: got '$(python_projects "$single")'"
+pass "python projects: top pyproject.toml at any depth, nested and skipped dirs left out"
+
+# One .venv volume per top python project: the host .venv mount point is created when missing,
+# the list of python repositories and the re-clone warning are printed.
+mkdir -p "$ws/a-b/.venv/bin"
+: > "$ws/a-b/.venv/bin/python"
+collect_venv_overlays "$ws" > "$work/python-ws/log"
+out=$(cat "$work/python-ws/log")
+for project in a a-b deep/x/y/svc mono/packages/api; do
+  [[ -d "$ws/$project/.venv" ]] || fail "no .venv mount point created in $project"
+  [[ "$out" == *"$project"* ]] || fail "python repository $project not listed: $out"
+done
+[[ -f "$ws/a-b/.venv/bin/python" ]] || fail "existing host .venv was touched"
+[[ ! -e "$ws/a/nested/.venv" && ! -e "$ws/plain/.venv/lib/.venv" ]] || fail "mount point created outside a top project"
+[[ "$out" == *"перезапусти визард"* ]] || fail "no re-run warning for a new python repository: $out"
+(( ${#VENV_OVERLAYS[@]} == 4 )) || fail "expected 4 overlays, got: ${VENV_OVERLAYS[*]}"
+targets=$(for overlay in "${VENV_OVERLAYS[@]}"; do printf '%s\n' "${overlay#* }"; done | LC_ALL=C sort | tr '\n' ' ')
+[[ "$targets" == "$ws/a-b/.venv $ws/a/.venv $ws/deep/x/y/svc/.venv $ws/mono/packages/api/.venv " ]] \
+  || fail "overlay targets: $targets"
+names=$(for overlay in "${VENV_OVERLAYS[@]}"; do printf '%s\n' "${overlay%% *}"; done)
+[[ "$(sort -u <<< "$names" | wc -l | tr -d ' ')" == 4 ]] || fail "projects share a venv volume: $names"
+while IFS= read -r name; do
+  [[ "$name" =~ ^opencode-venv-[a-z0-9-]+$ ]] || fail "bad venv volume name: $name"
+done <<< "$names"
+[[ "$(venv_volume_name "/w/one" "/w/one/proj")" != "$(venv_volume_name "/w" "/w/one/proj")" ]] \
+  || fail "one project seen from two workspaces shares a venv volume"
+
+collect_venv_overlays "$single" > /dev/null
+[[ "${VENV_OVERLAYS[*]}" == "$(venv_volume_name "$single") $single/.venv" ]] \
+  || fail "workspace as one python repository: ${VENV_OVERLAYS[*]}"
+
+mkdir -p "$work/python-ws/none"
+collect_venv_overlays "$work/python-ws/none" > "$work/python-ws/log"
+out=$(cat "$work/python-ws/log")
+(( ${#VENV_OVERLAYS[@]} == 0 )) || fail "overlays without python projects"
+[[ "$out" == *"перезапусти визард"* ]] || fail "no re-run warning without python repositories"
+pass "venv overlays: one volume per top project, mount points created, list and warning printed"
+
+# The overlays go to the override next to the read-only mounts. A re-run with the same
+# projects rewrites nothing and asks nothing; a declined rewrite with other projects is loud,
+# because the stale override leaves a host .venv to the container's uv sync.
+mkdir -p "$work/venv-override"
+(
+  cd "$work/venv-override"
+  SKIPPED=()
+  VENV_OVERLAYS=("opencode-venv-a-1 /w/a/.venv" 'opencode-venv-b-2 /w/q"uo$te/.venv')
+  apply_override "/key:/run/git-ssh/id" > /dev/null < /dev/null || fail "first override not written"
+  grep -qF '"/key:/run/git-ssh/id:ro"' "$OVERRIDE_FILE" || fail "read-only mount lost"
+  grep -qF 'target: "/w/a/.venv"' "$OVERRIDE_FILE" || fail "no overlay target for /w/a"
+  grep -qF 'target: "/w/q\"uo$$te/.venv"' "$OVERRIDE_FILE" || fail "overlay target not quoted for compose"
+  [[ "$(grep -c '^  opencode-venv-a-1:$' "$OVERRIDE_FILE")" == 1 ]] || fail "volume a not declared once"
+  grep -qF 'name: opencode-venv-b-2' "$OVERRIDE_FILE" || fail "volume b not named explicitly"
+  # A fresh volume takes the owner of its mount point from the image, so the image builds them.
+  grep -qF 'VENV_MOUNT_POINTS: "/w/a/.venv\n/w/q\"uo$$te/.venv"' "$OVERRIDE_FILE" \
+    || fail "mount points not passed to the image build"
+  before=$(cat "$OVERRIDE_FILE")
+
+  apply_override "/key:/run/git-ssh/id" > "$work/venv-override/log" < /dev/null \
+    || fail "unchanged override reported as not applied"
+  [[ "$(cat "$OVERRIDE_FILE")" == "$before" ]] || fail "re-run changed an up-to-date override"
+  ! grep -q 'Перезаписать' "$work/venv-override/log" || fail "re-run asked to overwrite an up-to-date override"
+
+  VENV_OVERLAYS+=("opencode-venv-c-3 /w/c/.venv")
+  ! apply_override "/key:/run/git-ssh/id" <<< "n" > /dev/null || fail "declined override reported as applied"
+  [[ "$(cat "$OVERRIDE_FILE")" == "$before" ]] || fail "declined override was rewritten"
+  [[ "${SKIPPED[*]}" == *"uv sync"* ]] || fail "declined override with python projects is silent: ${SKIPPED[*]}"
+
+  apply_override "/key:/run/git-ssh/id" <<< "y" > /dev/null || fail "accepted override not applied"
+  [[ "$(grep -c 'type: volume' "$OVERRIDE_FILE")" == 3 ]] || fail "overlays duplicated or lost after re-run"
+)
+pass "venv override: volumes written with the mounts, re-run idempotent, declined rewrite warned"
+
 # Workspace folder (ADR 0005): a folder that is itself a repository and holds nested ones gets
 # the opencode #51191 warning; a single repository and a plain folder of repositories don't.
 mkdir -p "$work/ws-nested/.git" "$work/ws-nested/libs/inner/.git" \

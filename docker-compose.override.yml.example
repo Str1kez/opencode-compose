@@ -2,6 +2,11 @@
 # keep only the lines that apply to you.
 services:
   opencode:
+    # Mount points of the .venv volumes below, one per line: the image creates them owned
+    # by opencode, otherwise a fresh volume is root-owned and uv can't write it.
+    build:
+      args:
+        VENV_MOUNT_POINTS: "/absolute/path/to/workspace/myproject/.venv"
     volumes:
       # Global skills shared between agents.
       - ${HOME}/.agents:/home/opencode/.agents:ro
@@ -11,3 +16,13 @@ services:
       # "broken symlink" at start) resolve only when their target is mounted at the
       # same absolute path. One line per target directory.
       - ${HOME}/dotfiles:${HOME}/dotfiles:ro
+      # The container's own .venv of a python project (ADR 0003), one volume per project.
+      # Without it the container's `uv sync` overwrites the host .venv with a Linux build.
+      # Create the host .venv first (mkdir), otherwise Docker creates it as root on Linux.
+      - type: volume
+        source: venv-myproject
+        target: /absolute/path/to/workspace/myproject/.venv
+
+volumes:
+  venv-myproject:
+    name: opencode-venv-myproject
