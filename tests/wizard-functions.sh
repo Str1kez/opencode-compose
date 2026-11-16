@@ -311,3 +311,18 @@ mkdir -p "$work/colima ws/it's/.git"
   colima_sees_workspace "$work/colima ws/it's" || fail "existing workspace reported as not mounted (rc $?)"
 )
 pass "colima probe: path with a space and a quote is found through a quoting colima ssh"
+
+# Workspace folder (ADR 0005): a folder that is itself a repository and holds nested ones gets
+# the opencode #51191 warning; a single repository and a plain folder of repositories don't.
+mkdir -p "$work/ws-nested/.git" "$work/ws-nested/libs/inner/.git" \
+  "$work/ws-single/.git" "$work/ws-single/node_modules/pkg/.git" \
+  "$work/ws-folder/a/.git" "$work/ws-folder/b/.git"
+(
+  out=$(warn_nested_repositories "$work/ws-nested")
+  [[ "$out" == *"#51191"* ]] || fail "repository with nested repositories: no #51191 warning"
+  [[ -z "$(warn_nested_repositories "$work/ws-single")" ]] \
+    || fail "single repository (git dirs only under node_modules) got a warning"
+  [[ -z "$(warn_nested_repositories "$work/ws-folder")" ]] \
+    || fail "folder of repositories that is not a repository got a warning"
+)
+pass "workspace folder: #51191 warning only for a repository with nested repositories"
