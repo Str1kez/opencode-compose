@@ -557,3 +557,44 @@ mkdir -p "$kh/refuse"
   [[ ! -e "$KNOWN_HOSTS_FILE" ]] || fail "refused fingerprint created known_hosts"
 )
 pass "git ssh: refusing the only new host writes nothing and fails the stage"
+
+# Push check after the start (US16): one dry-run push from the container per ssh host that made
+# it into known_hosts, from a repository that pushes there. The workspace folder may itself be
+# a repository with an https remote, which has nothing to push over ssh; a host left out of
+# known_hosts gets no push, and a check with nothing to push says why. docker is faked at its
+# boundary.
+pc="$work/push-check"
+ws="$pc/ws"
+mkdir -p "$pc/.git-ssh" "$pc/https-only"
+git init -q -b main "$ws"
+git -C "$ws" remote add origin "https://github.com/grp/root.git"
+for repo in a/one a/two b/three; do git init -q -b main "$ws/$repo"; done
+git -C "$ws/a/one" remote add origin "git@gitlab.example.invalid:grp/one.git"
+git -C "$ws/a/two" remote add origin "ssh://git@gitlab.example.invalid/grp/two.git"
+git -C "$ws/b/three" remote add origin "git@other.example.invalid:grp/three.git"
+git init -q -b main "$pc/https-only"
+git -C "$pc/https-only" remote add origin "https://github.com/grp/only.git"
+printf 'gitlab.example.invalid %s\n' "$(cut -d' ' -f1,2 "$kh/hostkeys/gitlab.example.invalid.pub")" \
+  > "$pc/.git-ssh/known_hosts"
+(
+  cd "$pc"
+  ssh() { command ssh -F /dev/null "$@"; }
+  docker() { printf '%s\n' "$*" >> "$pc/pushes"; }
+  # shellcheck disable=SC2034  # read by check_git_push_from_container from wizard-lib.sh
+  WORKSPACE="$ws"
+  check_git_push_from_container > "$pc/log" 2>&1
+  [[ "$(cat "$pc/pushes")" == "compose exec -T opencode git -C $ws/a/one push --dry-run origin HEAD" ]] \
+    || { cat "$pc/log"; fail "push check: dry-runs $(cat "$pc/pushes")"; }
+  grep -q '✓' "$pc/log" || fail "push check: passed push not reported"
+
+  rm "$pc/pushes" "$pc/.git-ssh/known_hosts"
+  check_git_push_from_container > "$pc/log" 2>&1
+  [[ ! -e "$pc/pushes" ]] || fail "push check without known_hosts pushed: $(cat "$pc/pushes")"
+  grep -q 'known_hosts' "$pc/log" || fail "push check without known_hosts is silent: $(cat "$pc/log")"
+
+  WORKSPACE="$pc/https-only"
+  check_git_push_from_container > "$pc/log" 2>&1
+  [[ ! -e "$pc/pushes" ]] || fail "push check without ssh remotes pushed: $(cat "$pc/pushes")"
+  grep -q 'ssh' "$pc/log" || fail "push check without ssh remotes is silent: $(cat "$pc/log")"
+)
+pass "push check: one dry-run per known ssh host from a repository on it, nothing to check is said"

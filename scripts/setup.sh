@@ -778,14 +778,15 @@ known_hosts_name() {
   if [[ "$2" == 22 ]]; then printf '%s' "$1"; else printf '[%s]:%s' "$1" "$2"; fi
 }
 
-# "host port" per ssh host and the remote URLs that push there, filled by collect_ssh_hosts.
+# "host port repo" per ssh host, repo being the first repository that pushes there, and the
+# remote URLs that push there, filled by collect_ssh_hosts.
 SSH_HOSTS=()
 SSH_REMOTES=()
 
 # collect_ssh_hosts WORKSPACE fills SSH_HOSTS with the hosts of the remotes of every repository
-# in WORKSPACE, each host once (lowercased, as ssh looks it up), and SSH_REMOTES with those
-# remotes. A repository without a remote, with a non-ssh remote or with an ~/.ssh/config alias
-# is skipped with a message: the container has no ~/.ssh/config.
+# in WORKSPACE, each host once (lowercased, as ssh looks it up) with the first repository on
+# it, and SSH_REMOTES with those remotes. A repository without a remote, with a non-ssh remote
+# or with an ~/.ssh/config alias is skipped with a message: the container has no ~/.ssh/config.
 collect_ssh_hosts() {
   local workspace="$1" repo url host_port host port resolved real_host real_port real_user entry known
   SSH_HOSTS=()
@@ -815,9 +816,9 @@ collect_ssh_hosts() {
     host=$(lowercase "$host")
     known=0
     for entry in ${SSH_HOSTS[@]+"${SSH_HOSTS[@]}"}; do
-      [[ "$entry" == "$host $port" ]] && known=1
+      [[ "$entry" == "$host $port "* ]] && known=1
     done
-    (( known )) || SSH_HOSTS+=("$host $port")
+    (( known )) || SSH_HOSTS+=("$host $port $repo")
   done < <(workspace_dirs_with "$workspace" .git)
 }
 
@@ -839,7 +840,7 @@ configure_git_ssh() {
   fi
   say "Хосты, куда пушат репозитории рабочей папки:"
   for entry in "${SSH_HOSTS[@]}"; do
-    read -r host port <<< "$entry"
+    read -r host port _ <<< "$entry"
     step "$host, порт $port"
   done
 
@@ -889,7 +890,7 @@ configure_git_ssh() {
   # half-written or emptied known_hosts behind.
   planned=$(mktemp)
   for entry in "${SSH_HOSTS[@]}"; do
-    read -r host port <<< "$entry"
+    read -r host port _ <<< "$entry"
     name=$(known_hosts_name "$host" "$port")
     printf '\n'
     if [[ -f "$KNOWN_HOSTS_FILE" ]] \
@@ -1013,17 +1014,35 @@ save_git_ssh_command() {
   fi
 }
 
-# Dry-run push from inside the running container: the check behind "agent can push".
-# Not fatal, the result is only shown.
+# Dry-run push from inside the running container: the check behind "agent can push". One push
+# per ssh host in $KNOWN_HOSTS_FILE, from the first repository of WORKSPACE that pushes there;
+# a host left out of it is already in SKIPPED. Not fatal, the result is only shown.
 check_git_push_from_container() {
-  local remote output line
-  remote=$(workspace_remote_name "$WORKSPACE") || return 0
-  step "git push --dry-run $remote HEAD из контейнера"
-  if output=$(docker compose exec -T opencode git -C "$WORKSPACE" push --dry-run "$remote" HEAD 2>&1); then
-    say "✓ push из контейнера проходит"
-  else
-    warn "push из контейнера не прошёл (визард на этом не останавливается):"
-    while IFS= read -r line; do note "  $line"; done <<< "$output"
+  local entry host port repo remote output line checked=0
+  # The skip messages were shown in the "Git-доступ по SSH" stage.
+  collect_ssh_hosts "$WORKSPACE" > /dev/null 2>&1
+  if (( ${#SSH_HOSTS[@]} == 0 )); then
+    note "push из контейнера не проверял: в $WORKSPACE нет репозиториев с ssh-remote"
+    return 0
+  fi
+  for entry in "${SSH_HOSTS[@]}"; do
+    read -r host port _ <<< "$entry"
+    repo="${entry#* * }"
+    [[ -f "$KNOWN_HOSTS_FILE" ]] \
+      && ssh-keygen -F "$(known_hosts_name "$host" "$port")" -f "$KNOWN_HOSTS_FILE" > /dev/null 2>&1 \
+      || continue
+    checked=1
+    remote=$(workspace_remote_name "$repo")
+    step "git -C $repo push --dry-run $remote HEAD из контейнера"
+    if output=$(docker compose exec -T opencode git -C "$repo" push --dry-run "$remote" HEAD 2>&1); then
+      say "✓ push на $host проходит"
+    else
+      warn "push на $host не прошёл (визард на этом не останавливается):"
+      while IFS= read -r line; do note "  $line"; done <<< "$output"
+    fi
+  done
+  if (( ! checked )); then
+    note "push из контейнера не проверял: ни один ssh-хост репозиториев не попал в $KNOWN_HOSTS_FILE"
   fi
 }
 
