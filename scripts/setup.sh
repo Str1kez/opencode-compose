@@ -375,7 +375,7 @@ configure_python_profile() {
   if [[ "$saved" == 1 ]]; then
     question="Оставить питон-профиль?"
   else
-    question="Это питон-проект? Включить питон-профиль?"
+    question="В рабочей папке есть питон-проекты? Включить питон-профиль?"
   fi
   drop_env UV_REGISTRY
   if ! confirm_default "$saved" "$question"; then
@@ -459,7 +459,7 @@ engine_profile() {
       ;;
     docker-desktop)
       ENGINE_TITLE="Docker Desktop"
-      ENGINE_MOUNT_NOTE="Docker Desktop пробрасывает пути из Settings → Resources → File sharing."$'\n'"По умолчанию там /Users, /Volumes, /private, /tmp. Репозиторий в другом месте добавь туда."
+      ENGINE_MOUNT_NOTE="Docker Desktop пробрасывает пути из Settings → Resources → File sharing."$'\n'"По умолчанию там /Users, /Volumes, /private, /tmp. Рабочую папку в другом месте добавь туда."
       ;;
     *)
       ENGINE_TITLE="docker-совместимый движок"
@@ -601,7 +601,7 @@ ensure_colima_workspace() {
   say "colima пробрасывает в свою VM только явно указанные папки, по умолчанию домашнюю."
   set_colima_start "$workspace"
   if ! colima_running; then
-    say "colima не запущена. Запусти её так, чтобы репозиторий был виден в VM:"
+    say "colima не запущена. Запусти её так, чтобы рабочая папка была видна в VM:"
     step "$(shell_line "${COLIMA_START[@]}")"
     if confirm "Запустить сейчас?"; then
       "${COLIMA_START[@]}" || true
@@ -984,7 +984,7 @@ write_override_file() {
 apply_override() {
   local planned
   if (( $# == 0 && ${#VENV_OVERLAYS[@]} == 0 )); then
-    say "Дополнительных папок и питон-репозиториев нет, $OVERRIDE_FILE не нужен."
+    say "Дополнительных папок и питон-проектов нет, $OVERRIDE_FILE не нужен."
     return 0
   fi
   planned=$(mktemp)
@@ -999,7 +999,7 @@ apply_override() {
     rm -f "$planned"
     SKIPPED+=("$OVERRIDE_FILE оставлен как был; проверь, что в нём есть нужные папки")
     if (( ${#VENV_OVERLAYS[@]} )); then
-      SKIPPED+=("в старом $OVERRIDE_FILE может не быть .venv-volume части питон-репозиториев: контейнерный uv sync перезапишет их хостовый .venv")
+      SKIPPED+=("в старом $OVERRIDE_FILE может не быть .venv-volume части питон-проектов: контейнерный uv sync перезапишет их хостовый .venv")
     fi
     return 1
   elif ! cat "$planned" > "$OVERRIDE_FILE"; then
@@ -1093,7 +1093,7 @@ prepare_venv_overlays() {
     VENV_OVERLAYS+=("$(venv_volume_name "$workspace" "$project") $project/.venv")
   done < <(python_projects "$workspace")
   show_python_projects "$workspace"
-  warn "склонировал новый питон-репозиторий — перезапусти визард. Без этого у него нет своего"
+  warn "появился новый питон-проект — перезапусти визард. Без этого у него нет своего"
   warn ".venv в контейнере, и контейнерный uv sync перезапишет его хостовый .venv."
 }
 
@@ -1102,9 +1102,9 @@ prepare_venv_overlays() {
 show_python_projects() {
   local workspace="$1" project
   if (( ${#VENV_OVERLAYS[@]} == 0 )); then
-    say "Питон-репозиториев в $workspace не нашёл."
+    say "Питон-проектов в $workspace не нашёл."
   else
-    say "Питон-репозитории, у каждого свой .venv в контейнере:"
+    say "Питон-проекты, у каждого свой .venv в контейнере:"
     for project in "${VENV_OVERLAYS[@]}"; do
       project="${project#* }"
       project="${project%/.venv}"
@@ -1159,9 +1159,9 @@ save_workspace_identity() {
   home_volume=$(home_volume_name "$workspace")
   write_env HOME_VOLUME "$home_volume"
   if [[ -z "$home_before" && -n "$saved_workspace" ]]; then
-    note "Домашняя папка контейнера теперь своя у каждого репозитория: логин в провайдерах и загрузка opencode повторятся."
-    note "Чтобы оставить общую, пропиши в .env HOME_VOLUME=$SHARED_HOME_VOLUME. Риск: агент в одном репозитории сможет подложить код, который запустится в другом."
-    note "В старой общей $SHARED_HOME_VOLUME могла остаться подложенная закладка и токены всех провайдеров: когда все репозитории перейдут, считай её недоверенной и удали (docker volume rm $SHARED_HOME_VOLUME)."
+    note "Домашняя папка контейнера теперь своя у каждой рабочей папки: логин в провайдерах и загрузка opencode повторятся."
+    note "Чтобы оставить общую, пропиши в .env HOME_VOLUME=$SHARED_HOME_VOLUME. Риск: агент в одной рабочей папке сможет подложить код, который запустится в другой."
+    note "В старой общей $SHARED_HOME_VOLUME могла остаться подложенная закладка и токены всех провайдеров: когда все рабочие папки перейдут, считай её недоверенной и удали (docker volume rm $SHARED_HOME_VOLUME)."
   elif [[ -n "$home_before" && "$home_before" != "$home_volume" ]]; then
     note "HOME_VOLUME=$home_before заменён на $home_volume: логин и бинарь из старого volume больше не используются. Общую домашку можно оставить только именем $SHARED_HOME_VOLUME."
   fi
@@ -1230,7 +1230,7 @@ if docker info >/dev/null 2>&1; then
   say "✓ движок: $ENGINE_TITLE"
 elif (( ENGINE_IS_COLIMA )); then
   say "colima установлена, но не запущена. Команду запуска дам после выбора рабочей папки:"
-  say "ей нужен путь к нему, иначе контейнер его не увидит."
+  say "ей нужен путь к ней, иначе контейнер её не увидит."
 else
   warn "Docker-демон не отвечает. Запусти свой движок (colima, OrbStack, Docker Desktop) и запусти визард снова."
   exit 1
@@ -1401,7 +1401,7 @@ write_env APT_CONFIG_SOURCE "$APT_CONFIG_SOURCE"
 
 printf '\n'
 say "Питон-профиль: $PYTHON_PROFILE_APT_PACKAGES (gcc для сборки колёс) и uv прямо в образ."
-say "Системный питон не ставится: uv приносит свой при uv sync. У каждого питон-репозитория"
+say "Системный питон не ставится: uv приносит свой при uv sync. У каждого питон-проекта"
 say "в контейнере свой .venv поверх хостового, хостовый контейнер не видит и не трогает."
 default_packages=""
 configure_python_profile
@@ -1428,7 +1428,7 @@ pause "Enter, чтобы продолжить"
 # ── 7 ─────────────────────────────────────────────────────────────────────
 stage "Владелец файлов"
 if [[ "$(uname -s)" == "Linux" ]]; then
-  say "На Linux контейнер должен работать под твоим UID и GID, иначе файлы в репозитории"
+  say "На Linux контейнер должен работать под твоим UID и GID, иначе файлы в рабочей папке"
   say "будут принадлежать чужому пользователю."
   write_env OPENCODE_UID "$(id -u)"
   write_env OPENCODE_GID "$(id -g)"
