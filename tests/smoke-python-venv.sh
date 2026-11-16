@@ -2,6 +2,8 @@
 # Integration smoke for the python toolchain profile: a python project with a host-side
 # .venv; inside the container `uv sync` builds its own Linux .venv, `.venv/bin/python -c`
 # runs, the host .venv stays untouched, and the .venv lives in the per-repository volume.
+# uv comes from pip in a throwaway stage: the pinned version, no python or pip in the image,
+# and the index address nowhere in its history.
 #
 # Usage: tests/smoke-python-venv.sh [NN] [UID]
 # Uses compose project oc-tNN, image opencode-server:tNN and volumes oc-tNN-venv and
@@ -32,6 +34,8 @@ EOF
 printf 'home = /opt/homebrew/bin\n' > "$work/proj/.venv/pyvenv.cfg"
 printf '#!/bin/sh\necho host-python\n' > "$work/proj/.venv/bin/python"
 chmod +x "$work/proj/.venv/bin/python"
+uv_version=$(sed -n 's/^uv==\([^ ]*\).*/\1/p' "$repo_root/docker/uv-requirements.txt")
+uv_index="https://pypi.org/simple"
 host_before=$(find "$work/proj/.venv" -type f -exec shasum {} + | sort)
 
 cat > "$work/env" <<EOF
@@ -42,6 +46,7 @@ HOST_OPENCODE_CONFIG=$work/opencode-config
 HOST_GITCONFIG=$work/gitconfig
 EXTRA_APT_PACKAGES=build-essential
 INSTALL_UV=1
+UV_PIP_INDEX_URL=$uv_index
 VENV_VOLUME=$venv_volume
 HOME_VOLUME=$project-home
 OPENCODE_UID=$uid
@@ -58,14 +63,21 @@ compose=(docker compose -p "$project" --env-file "$work/env"
 trap '"${compose[@]}" down -v >/dev/null 2>&1 || true' EXIT
 
 "${compose[@]}" build
-"${compose[@]}" run --rm --no-deps --entrypoint bash opencode -euc '
+# shellcheck disable=SC2016  # the script runs in the container, UV_VERSION comes through -e
+"${compose[@]}" run --rm --no-deps -e UV_VERSION="$uv_version" --entrypoint bash opencode -euc '
   test ! -e .venv/pyvenv.cfg || { echo "FAIL: host .venv visible in container"; exit 1; }
   command -v python3 && { echo "FAIL: system python in image"; exit 1; }
+  command -v pip3 pip && { echo "FAIL: pip in image"; exit 1; }
   dpkg -s python3-dev >/dev/null 2>&1 && { echo "FAIL: python3-dev in image"; exit 1; }
-  uv --version
+  [[ "$(uv --version) " == "uv $UV_VERSION "* ]] || { echo "FAIL: uv $(uv --version), want $UV_VERSION"; exit 1; }
   uv sync
   .venv/bin/python -c "import iniconfig, sys, platform; print(\"container python\", sys.version.split()[0], platform.system())"
 '
+
+if docker history --no-trunc "opencode-server:t$id" | grep -qF "$uv_index"; then
+  echo "FAIL: the PyPI index address is in the image history"
+  exit 1
+fi
 
 host_after=$(find "$work/proj/.venv" -type f -exec shasum {} + | sort)
 if [[ "$host_before" != "$host_after" ]]; then
