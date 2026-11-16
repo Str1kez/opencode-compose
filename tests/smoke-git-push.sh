@@ -44,10 +44,8 @@ trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok: $*"; }
 
-# The wizard's helpers: everything in setup.sh above run_wizard.
-awk '/^run_wizard\(\) \{/ { exit } { print }' "$repo_root/scripts/setup.sh" > "$work/wizard-lib.sh"
-# shellcheck source=/dev/null
-source "$work/wizard-lib.sh"
+# shellcheck source=tests/load-wizard-lib.sh
+source "$repo_root/tests/load-wizard-lib.sh"
 
 mkdir -p "$work/home/.ssh" "$work/opencode-config"
 ssh-keygen -q -t ed25519 -N '' -C smoke-deploy -f "$work/home/.ssh/id_deploy"
@@ -144,9 +142,13 @@ if compose exec -T opencode sh -c "echo x >> $CONTAINER_GIT_KEY" 2>/dev/null; th
 fi
 pass "key and known_hosts are read-only"
 
-# shellcheck disable=SC2034  # read by check_git_push_from_container from wizard-lib.sh
-WORKSPACE="$ws"
-check_git_push_from_container > "$work/check.log" 2>&1
+# From the directory the wizard step ran in: the check reads the known_hosts it wrote there.
+(
+  cd "$work"
+  # shellcheck disable=SC2034  # read by check_git_push_from_container from wizard-lib.sh
+  WORKSPACE="$ws"
+  check_git_push_from_container > "$work/check.log" 2>&1
+)
 grep -q '✓' "$work/check.log" || { cat "$work/check.log"; fail "post-setup push check did not pass"; }
 pass "post-setup dry-run push from the container passed"
 

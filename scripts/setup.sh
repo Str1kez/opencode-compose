@@ -220,7 +220,7 @@ readonly UV_PIP_INDEX_URL_PATTERN='^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9
 readonly KNOWN_HOSTS_FILE=".git-ssh/known_hosts"
 readonly CONTAINER_GIT_KEY="/run/git-ssh/id"
 readonly CONTAINER_KNOWN_HOSTS="/run/git-ssh/known_hosts"
-# "VOLUME TARGET" per python project, filled by collect_venv_overlays, written by
+# "VOLUME TARGET" per python project, filled by prepare_venv_overlays, written by
 # write_override_file.
 VENV_OVERLAYS=()
 
@@ -375,7 +375,7 @@ configure_python_profile() {
   if [[ "$saved" == 1 ]]; then
     question="Оставить питон-профиль?"
   else
-    question="Это питон-проект? Включить питон-профиль?"
+    question="В рабочей папке есть питон-проекты? Включить питон-профиль?"
   fi
   drop_env UV_REGISTRY
   if ! confirm_default "$saved" "$question"; then
@@ -459,7 +459,7 @@ engine_profile() {
       ;;
     docker-desktop)
       ENGINE_TITLE="Docker Desktop"
-      ENGINE_MOUNT_NOTE="Docker Desktop пробрасывает пути из Settings → Resources → File sharing."$'\n'"По умолчанию там /Users, /Volumes, /private, /tmp. Репозиторий в другом месте добавь туда."
+      ENGINE_MOUNT_NOTE="Docker Desktop пробрасывает пути из Settings → Resources → File sharing."$'\n'"По умолчанию там /Users, /Volumes, /private, /tmp. Рабочую папку в другом месте добавь туда."
       ;;
     *)
       ENGINE_TITLE="docker-совместимый движок"
@@ -601,7 +601,7 @@ ensure_colima_workspace() {
   say "colima пробрасывает в свою VM только явно указанные папки, по умолчанию домашнюю."
   set_colima_start "$workspace"
   if ! colima_running; then
-    say "colima не запущена. Запусти её так, чтобы репозиторий был виден в VM:"
+    say "colima не запущена. Запусти её так, чтобы рабочая папка была видна в VM:"
     step "$(shell_line "${COLIMA_START[@]}")"
     if confirm "Запустить сейчас?"; then
       "${COLIMA_START[@]}" || true
@@ -778,14 +778,15 @@ known_hosts_name() {
   if [[ "$2" == 22 ]]; then printf '%s' "$1"; else printf '[%s]:%s' "$1" "$2"; fi
 }
 
-# "host port" per ssh host and the remote URLs that push there, filled by collect_ssh_hosts.
+# "host port repo" per ssh host, repo being the first repository that pushes there, and the
+# remote URLs that push there, filled by collect_ssh_hosts.
 SSH_HOSTS=()
 SSH_REMOTES=()
 
 # collect_ssh_hosts WORKSPACE fills SSH_HOSTS with the hosts of the remotes of every repository
-# in WORKSPACE, each host once (lowercased, as ssh looks it up), and SSH_REMOTES with those
-# remotes. A repository without a remote, with a non-ssh remote or with an ~/.ssh/config alias
-# is skipped with a message: the container has no ~/.ssh/config.
+# in WORKSPACE, each host once (lowercased, as ssh looks it up) with the first repository on
+# it, and SSH_REMOTES with those remotes. A repository without a remote, with a non-ssh remote
+# or with an ~/.ssh/config alias is skipped with a message: the container has no ~/.ssh/config.
 collect_ssh_hosts() {
   local workspace="$1" repo url host_port host port resolved real_host real_port real_user entry known
   SSH_HOSTS=()
@@ -815,9 +816,9 @@ collect_ssh_hosts() {
     host=$(lowercase "$host")
     known=0
     for entry in ${SSH_HOSTS[@]+"${SSH_HOSTS[@]}"}; do
-      [[ "$entry" == "$host $port" ]] && known=1
+      [[ "$entry" == "$host $port "* ]] && known=1
     done
-    (( known )) || SSH_HOSTS+=("$host $port")
+    (( known )) || SSH_HOSTS+=("$host $port $repo")
   done < <(workspace_dirs_with "$workspace" .git)
 }
 
@@ -839,7 +840,7 @@ configure_git_ssh() {
   fi
   say "Хосты, куда пушат репозитории рабочей папки:"
   for entry in "${SSH_HOSTS[@]}"; do
-    read -r host port <<< "$entry"
+    read -r host port _ <<< "$entry"
     step "$host, порт $port"
   done
 
@@ -889,7 +890,7 @@ configure_git_ssh() {
   # half-written or emptied known_hosts behind.
   planned=$(mktemp)
   for entry in "${SSH_HOSTS[@]}"; do
-    read -r host port <<< "$entry"
+    read -r host port _ <<< "$entry"
     name=$(known_hosts_name "$host" "$port")
     printf '\n'
     if [[ -f "$KNOWN_HOSTS_FILE" ]] \
@@ -920,8 +921,11 @@ configure_git_ssh() {
     warn "ни один хост не попал в known_hosts, $KNOWN_HOSTS_FILE не трогаю"
     return 1
   fi
-  mkdir -p "$(dirname "$KNOWN_HOSTS_FILE")"
-  cat "$planned" > "$KNOWN_HOSTS_FILE"
+  if ! { mkdir -p "$(dirname "$KNOWN_HOSTS_FILE")" && cat "$planned" > "$KNOWN_HOSTS_FILE"; }; then
+    rm -f "$planned"
+    warn "не смог записать $KNOWN_HOSTS_FILE"
+    return 1
+  fi
   rm -f "$planned"
   say "✓ записал $KNOWN_HOSTS_FILE"
 
@@ -959,7 +963,7 @@ write_override_file() {
     fi
     printf '    volumes:\n'
     for mount in "$@"; do
-      printf '      - "%s:ro"\n' "$mount"
+      printf '      - "%s:ro"\n' "$(compose_escape "$mount")"
     done
     for overlay in ${VENV_OVERLAYS[@]+"${VENV_OVERLAYS[@]}"}; do
       printf '      - type: volume\n        source: %s\n        target: "%s"\n' \
@@ -976,26 +980,33 @@ write_override_file() {
 
 # apply_override MOUNT... brings $OVERRIDE_FILE in line with the mounts and VENV_OVERLAYS.
 # An up-to-date file is left as is without a question. Returns 1 when the user declined to
-# overwrite an existing file, so the old file still stands.
+# overwrite an existing file, so the old file still stands, or when it couldn't be written.
 apply_override() {
   local planned
   if (( $# == 0 && ${#VENV_OVERLAYS[@]} == 0 )); then
-    say "Дополнительных папок и питон-репозиториев нет, $OVERRIDE_FILE не нужен."
+    say "Дополнительных папок и питон-проектов нет, $OVERRIDE_FILE не нужен."
     return 0
   fi
   planned=$(mktemp)
-  write_override_file "$planned" "$@"
+  if ! write_override_file "$planned" "$@"; then
+    rm -f "$planned"
+    warn "не смог собрать $OVERRIDE_FILE"
+    return 1
+  fi
   if [[ -f "$OVERRIDE_FILE" ]] && cmp -s "$planned" "$OVERRIDE_FILE"; then
     say "✓ $OVERRIDE_FILE уже такой, как нужно"
   elif [[ -f "$OVERRIDE_FILE" ]] && ! confirm "$OVERRIDE_FILE уже есть. Перезаписать?"; then
     rm -f "$planned"
     SKIPPED+=("$OVERRIDE_FILE оставлен как был; проверь, что в нём есть нужные папки")
     if (( ${#VENV_OVERLAYS[@]} )); then
-      SKIPPED+=("в старом $OVERRIDE_FILE может не быть .venv-volume части питон-репозиториев: контейнерный uv sync перезапишет их хостовый .venv")
+      SKIPPED+=("в старом $OVERRIDE_FILE может не быть .venv-volume части питон-проектов: контейнерный uv sync перезапишет их хостовый .venv")
     fi
     return 1
+  elif ! cat "$planned" > "$OVERRIDE_FILE"; then
+    rm -f "$planned"
+    warn "не смог записать $OVERRIDE_FILE"
+    return 1
   else
-    cat "$planned" > "$OVERRIDE_FILE"
     say "✓ записал $OVERRIDE_FILE"
   fi
   rm -f "$planned"
@@ -1013,17 +1024,35 @@ save_git_ssh_command() {
   fi
 }
 
-# Dry-run push from inside the running container: the check behind "agent can push".
-# Not fatal, the result is only shown.
+# Dry-run push from inside the running container: the check behind "agent can push". One push
+# per ssh host in $KNOWN_HOSTS_FILE, from the first repository of WORKSPACE that pushes there;
+# a host left out of it is already in SKIPPED. Not fatal, the result is only shown.
 check_git_push_from_container() {
-  local remote output line
-  remote=$(workspace_remote_name "$WORKSPACE") || return 0
-  step "git push --dry-run $remote HEAD из контейнера"
-  if output=$(docker compose exec -T opencode git -C "$WORKSPACE" push --dry-run "$remote" HEAD 2>&1); then
-    say "✓ push из контейнера проходит"
-  else
-    warn "push из контейнера не прошёл (визард на этом не останавливается):"
-    while IFS= read -r line; do note "  $line"; done <<< "$output"
+  local entry host port repo remote output line checked=0
+  # The skip messages were shown in the "Git-доступ по SSH" stage.
+  collect_ssh_hosts "$WORKSPACE" > /dev/null 2>&1
+  if (( ${#SSH_HOSTS[@]} == 0 )); then
+    note "push из контейнера не проверял: в $WORKSPACE нет репозиториев с ssh-remote"
+    return 0
+  fi
+  for entry in "${SSH_HOSTS[@]}"; do
+    read -r host port _ <<< "$entry"
+    repo="${entry#* * }"
+    [[ -f "$KNOWN_HOSTS_FILE" ]] \
+      && ssh-keygen -F "$(known_hosts_name "$host" "$port")" -f "$KNOWN_HOSTS_FILE" > /dev/null 2>&1 \
+      || continue
+    checked=1
+    remote=$(workspace_remote_name "$repo")
+    step "git -C $repo push --dry-run $remote HEAD из контейнера"
+    if output=$(docker compose exec -T opencode git -C "$repo" push --dry-run "$remote" HEAD 2>&1); then
+      say "✓ push на $host проходит"
+    else
+      warn "push на $host не прошёл (визард на этом не останавливается):"
+      while IFS= read -r line; do note "  $line"; done <<< "$output"
+    fi
+  done
+  if (( ! checked )); then
+    note "push из контейнера не проверял: ни один ssh-хост репозиториев не попал в $KNOWN_HOSTS_FILE"
   fi
 }
 
@@ -1041,18 +1070,18 @@ workspace_slug() {
   printf '%s-%s' "$slug" "$(path_checksum "${2:-$1}")"
 }
 
-# venv_volume_name WORKSPACE [PROJECT] names the volume over PROJECT/.venv (WORKSPACE itself
-# by default). The checksum covers the workspace too: a project seen from two overlapping
-# workspaces gets two volumes, and their containers share no executables.
+# venv_volume_name WORKSPACE PROJECT names the volume over PROJECT/.venv. The checksum covers
+# the workspace too: a project seen from two overlapping workspaces gets two volumes, and
+# their containers share no executables.
 venv_volume_name() {
-  local workspace="$1" project="${2:-$1}"
+  local workspace="$1" project="$2"
   printf 'opencode-venv-%s' "$(workspace_slug "$project" "$workspace"$'\n'"$project")"
 }
 
-# collect_venv_overlays WORKSPACE fills VENV_OVERLAYS with "VOLUME TARGET" for the .venv of
+# prepare_venv_overlays WORKSPACE fills VENV_OVERLAYS with "VOLUME TARGET" for the .venv of
 # every top python project, creates a missing host .venv as the mount point (otherwise
 # Docker creates it, as root on Linux) and prints the projects with the re-run warning.
-collect_venv_overlays() {
+prepare_venv_overlays() {
   local workspace="$1" project
   VENV_OVERLAYS=()
   while IFS= read -r project; do
@@ -1063,10 +1092,19 @@ collect_venv_overlays() {
     fi
     VENV_OVERLAYS+=("$(venv_volume_name "$workspace" "$project") $project/.venv")
   done < <(python_projects "$workspace")
+  show_python_projects "$workspace"
+  warn "появился новый питон-проект — перезапусти визард. Без этого у него нет своего"
+  warn ".venv в контейнере, и контейнерный uv sync перезапишет его хостовый .venv."
+}
+
+# show_python_projects WORKSPACE prints the python projects in VENV_OVERLAYS relative to
+# WORKSPACE.
+show_python_projects() {
+  local workspace="$1" project
   if (( ${#VENV_OVERLAYS[@]} == 0 )); then
-    say "Питон-репозиториев в $workspace не нашёл."
+    say "Питон-проектов в $workspace не нашёл."
   else
-    say "Питон-репозитории, у каждого свой .venv в контейнере:"
+    say "Питон-проекты, у каждого свой .venv в контейнере:"
     for project in "${VENV_OVERLAYS[@]}"; do
       project="${project#* }"
       project="${project%/.venv}"
@@ -1078,8 +1116,6 @@ collect_venv_overlays() {
       fi
     done
   fi
-  warn "склонировал новый питон-репозиторий — перезапусти визард. Без этого у него нет своего"
-  warn ".venv в контейнере, и контейнерный uv sync перезапишет его хостовый .venv."
 }
 
 home_volume_name() {
@@ -1114,7 +1150,7 @@ save_workspace_identity() {
     write_env COMPOSE_PROJECT_NAME "$(compose_project_name "$workspace")"
     write_env OPENCODE_PORT "$(workspace_port "$workspace")"
   fi
-  # The .venv volumes are per python project now and live in $OVERRIDE_FILE.
+  # The .venv volumes, one per python project, live in $OVERRIDE_FILE: compose reads no VENV_VOLUME.
   drop_env VENV_VOLUME
   if [[ "$home_before" == "$SHARED_HOME_VOLUME" ]]; then
     write_env HOME_VOLUME "$SHARED_HOME_VOLUME"
@@ -1123,9 +1159,9 @@ save_workspace_identity() {
   home_volume=$(home_volume_name "$workspace")
   write_env HOME_VOLUME "$home_volume"
   if [[ -z "$home_before" && -n "$saved_workspace" ]]; then
-    note "Домашняя папка контейнера теперь своя у каждого репозитория: логин в провайдерах и загрузка opencode повторятся."
-    note "Чтобы оставить общую, пропиши в .env HOME_VOLUME=$SHARED_HOME_VOLUME. Риск: агент в одном репозитории сможет подложить код, который запустится в другом."
-    note "В старой общей $SHARED_HOME_VOLUME могла остаться подложенная закладка и токены всех провайдеров: когда все репозитории перейдут, считай её недоверенной и удали (docker volume rm $SHARED_HOME_VOLUME)."
+    note "Домашняя папка контейнера теперь своя у каждой рабочей папки: логин в провайдерах и загрузка opencode повторятся."
+    note "Чтобы оставить общую, пропиши в .env HOME_VOLUME=$SHARED_HOME_VOLUME. Риск: агент в одной рабочей папке сможет подложить код, который запустится в другой."
+    note "В старой общей $SHARED_HOME_VOLUME могла остаться подложенная закладка и токены всех провайдеров: когда все рабочие папки перейдут, считай её недоверенной и удали (docker volume rm $SHARED_HOME_VOLUME)."
   elif [[ -n "$home_before" && "$home_before" != "$home_volume" ]]; then
     note "HOME_VOLUME=$home_before заменён на $home_volume: логин и бинарь из старого volume больше не используются. Общую домашку можно оставить только именем $SHARED_HOME_VOLUME."
   fi
@@ -1194,7 +1230,7 @@ if docker info >/dev/null 2>&1; then
   say "✓ движок: $ENGINE_TITLE"
 elif (( ENGINE_IS_COLIMA )); then
   say "colima установлена, но не запущена. Команду запуска дам после выбора рабочей папки:"
-  say "ей нужен путь к нему, иначе контейнер его не увидит."
+  say "ей нужен путь к ней, иначе контейнер её не увидит."
 else
   warn "Docker-демон не отвечает. Запусти свой движок (colima, OrbStack, Docker Desktop) и запусти визард снова."
   exit 1
@@ -1365,7 +1401,7 @@ write_env APT_CONFIG_SOURCE "$APT_CONFIG_SOURCE"
 
 printf '\n'
 say "Питон-профиль: $PYTHON_PROFILE_APT_PACKAGES (gcc для сборки колёс) и uv прямо в образ."
-say "Системный питон не ставится: uv приносит свой при uv sync. У каждого питон-репозитория"
+say "Системный питон не ставится: uv приносит свой при uv sync. У каждого питон-проекта"
 say "в контейнере свой .venv поверх хостового, хостовый контейнер не видит и не трогает."
 default_packages=""
 configure_python_profile
@@ -1386,13 +1422,13 @@ done
 write_env EXTRA_APT_PACKAGES "$EXTRA_APT_PACKAGES"
 printf '\n'
 # Written to $OVERRIDE_FILE in the "Дополнительные папки" stage.
-collect_venv_overlays "$WORKSPACE"
+prepare_venv_overlays "$WORKSPACE"
 pause "Enter, чтобы продолжить"
 
 # ── 7 ─────────────────────────────────────────────────────────────────────
 stage "Владелец файлов"
 if [[ "$(uname -s)" == "Linux" ]]; then
-  say "На Linux контейнер должен работать под твоим UID и GID, иначе файлы в репозитории"
+  say "На Linux контейнер должен работать под твоим UID и GID, иначе файлы в рабочей папке"
   say "будут принадлежать чужому пользователю."
   write_env OPENCODE_UID "$(id -u)"
   write_env OPENCODE_GID "$(id -g)"
@@ -1532,6 +1568,8 @@ say "Ключи провайдеров хранятся в базе opencode, а
 say "подключи провайдера в веб-интерфейсе или так:"
 say "  docker compose exec opencode opencode auth login --server http://127.0.0.1:4096"
 say "Лог: docker compose logs -f    Остановить: docker compose down"
+printf '\n'
+show_python_projects "$WORKSPACE"
 printf '\n'
 }
 

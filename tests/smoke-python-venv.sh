@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Integration smoke for the python toolchain profile: a workspace folder with two python
-# repositories at different depths, each with a host-side .venv. The wizard's own traversal
-# finds both and its override generator mounts a volume over each .venv; inside the container
-# `uv sync` builds a Linux .venv in both, `.venv/bin/python -c` runs, both host .venv stay
-# untouched, and each .venv lives in its own volume.
+# projects at different depths, each with a host-side .venv. The wizard's override generator
+# mounts a volume over each .venv (finding the projects is covered by wizard-functions.sh);
+# inside the container `uv sync` builds a Linux .venv in both, `.venv/bin/python -c` runs,
+# both host .venv stay untouched, and each .venv lives in its own volume.
 # uv comes from pip in a throwaway stage: the pinned version, no python or pip in the image,
 # and the index address nowhere in its history.
 #
@@ -23,9 +23,8 @@ work=$(cd "$(mktemp -d "${TMPDIR:-/tmp}/smoke-python-venv.XXXXXX")" && pwd -P)
 ws="$work/ws"
 repos=(a group/b)
 
-awk '/^run_wizard\(\) \{/ { exit } { print }' "$repo_root/scripts/setup.sh" > "$work/wizard-lib.sh"
-# shellcheck source=/dev/null
-source "$work/wizard-lib.sh"
+# shellcheck source=tests/load-wizard-lib.sh
+source "$repo_root/tests/load-wizard-lib.sh"
 
 mkdir -p "$work/opencode-config"
 printf '[user]\n\tname = smoke\n\temail = smoke@example.invalid\n' > "$work/gitconfig"
@@ -47,9 +46,7 @@ uv_version=$(sed -n 's/^uv==\([^ ]*\).*/\1/p' "$repo_root/docker/uv-requirements
 uv_index="https://pypi.org/simple"
 host_before=$(find "$ws" -path '*/.venv/*' -type f -exec shasum {} + | sort)
 
-# The wizard's traversal, the smoke's own volume names.
-found=$(python_projects "$ws" | LC_ALL=C sort | tr '\n' ' ')
-[[ "$found" == "$ws/a $ws/group/b " ]] || { echo "FAIL: python projects found: $found"; exit 1; }
+# The smoke's own volume names.
 VENV_OVERLAYS=("$project-venv-a $ws/a/.venv" "$project-venv-b $ws/group/b/.venv")
 write_override_file "$work/override.yml"
 
@@ -108,4 +105,4 @@ for volume in "$project-venv-a" "$project-venv-b"; do
   docker volume inspect "$volume" >/dev/null 2>&1 \
     || { echo "FAIL: the venv did not land in volume $volume"; exit 1; }
 done
-echo "PASS (uid $uid): host .venv of both repositories untouched, venvs in $project-venv-a and $project-venv-b"
+echo "PASS (uid $uid): host .venv of both python projects untouched, venvs in $project-venv-a and $project-venv-b"
