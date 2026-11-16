@@ -115,7 +115,6 @@ cat > "$work/.env" <<EOF
 WORKSPACE='$ws'
 OPENCODE_SERVER_PASSWORD='smoke-password-$id'
 OPENCODE_PORT='41$id'
-VENV_VOLUME='$project-venv'
 HOME_VOLUME='$project-home'
 HOST_OPENCODE_CONFIG='$work/opencode-config'
 HOST_GITCONFIG='$work/gitconfig'
