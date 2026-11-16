@@ -142,9 +142,13 @@ if compose exec -T opencode sh -c "echo x >> $CONTAINER_GIT_KEY" 2>/dev/null; th
 fi
 pass "key and known_hosts are read-only"
 
-# shellcheck disable=SC2034  # read by check_git_push_from_container from wizard-lib.sh
-WORKSPACE="$ws"
-check_git_push_from_container > "$work/check.log" 2>&1
+# From the directory the wizard step ran in: the check reads the known_hosts it wrote there.
+(
+  cd "$work"
+  # shellcheck disable=SC2034  # read by check_git_push_from_container from wizard-lib.sh
+  WORKSPACE="$ws"
+  check_git_push_from_container > "$work/check.log" 2>&1
+)
 grep -q '✓' "$work/check.log" || { cat "$work/check.log"; fail "post-setup push check did not pass"; }
 pass "post-setup dry-run push from the container passed"
 
