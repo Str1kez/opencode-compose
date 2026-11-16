@@ -12,7 +12,6 @@ services:
         UV_PIP_INDEX_URL: ${UV_PIP_INDEX_URL:-https://pypi.org/simple}
         EXTRA_APT_PACKAGES: ${EXTRA_APT_PACKAGES:-}
         INSTALL_UV: ${INSTALL_UV:-0}
-        WORKSPACE: ${WORKSPACE:?set WORKSPACE in .env}
         OPENCODE_UID: ${OPENCODE_UID:-1000}
         OPENCODE_GID: ${OPENCODE_GID:-1000}
     # Per project: repositories with different toolchains don't retag each other's image.
@@ -56,12 +55,9 @@ services:
         target: ${WORKSPACE:?set WORKSPACE in .env}
         bind:
           create_host_path: false
-      # The host .venv is built for macOS and is useless in Linux; the container gets
-      # its own one at the standard path (ADR 0003). The mount point is an empty .venv
-      # directory in WORKSPACE on the host, created by the wizard (or by hand).
-      - type: volume
-        source: workspace-venv
-        target: ${WORKSPACE:?set WORKSPACE in .env}/.venv
+      # The container's own .venv of every python project (ADR 0003) is a volume per project,
+      # mounted over the host .venv by docker-compose.override.yml, which the wizard writes
+      # together with the VENV_MOUNT_POINTS build arg.
       - type: volume
         source: opencode-home
         target: /home/opencode
@@ -96,7 +92,3 @@ volumes:
   # setups without the wizard; set HOME_VOLUME=opencode_opencode-home to opt in on purpose.
   opencode-home:
     name: ${HOME_VOLUME:-opencode_opencode-home}
-  # Named per repository (the wizard derives VENV_VOLUME from WORKSPACE), so switching
-  # WORKSPACE doesn't reuse another repository's venv.
-  workspace-venv:
-    name: ${VENV_VOLUME:-opencode-venv}

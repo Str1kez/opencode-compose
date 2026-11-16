@@ -86,13 +86,14 @@ RUN user=$(awk -F: -v uid="$OPENCODE_UID" '$3 == uid { print $1 }' /etc/passwd);
 # Empty with INSTALL_UV=0, the uv binary with INSTALL_UV=1.
 COPY --from=uv /out/ /usr/local/bin/
 
-# A named volume mounted over WORKSPACE/.venv keeps the container venv apart from the
-# host one (ADR 0003). A fresh volume copies the owner of its mount point from the
-# image, so the mount point is created here, owned by opencode, or uv can't write it.
-ARG WORKSPACE=""
-RUN if [ -n "$WORKSPACE" ]; then \
-        install -d -o "$OPENCODE_UID" -g "$OPENCODE_GID" "$WORKSPACE/.venv"; \
-    fi
+# A named volume over the .venv of every python project keeps the container venv apart
+# from the host one (ADR 0003). A fresh volume copies the owner of its mount point from
+# the image, so the mount points are created here, owned by opencode, or uv can't write
+# them. The wizard passes them one per line through docker-compose.override.yml.
+ARG VENV_MOUNT_POINTS=""
+RUN printf '%s\n' "$VENV_MOUNT_POINTS" | while IFS= read -r dir; do \
+        [ -z "$dir" ] || install -d -o "$OPENCODE_UID" -g "$OPENCODE_GID" "$dir"; \
+    done
 
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY --chmod=755 docker/opencode-update.sh /usr/local/bin/opencode-update
