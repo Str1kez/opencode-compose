@@ -9,7 +9,7 @@ services:
       dockerfile: docker/Dockerfile
       args:
         BASE_IMAGE: ${BASE_IMAGE:-debian:trixie-slim}
-        UV_REGISTRY: ${UV_REGISTRY:-ghcr.io}
+        UV_PIP_INDEX_URL: ${UV_PIP_INDEX_URL:-https://pypi.org/simple}
         EXTRA_APT_PACKAGES: ${EXTRA_APT_PACKAGES:-}
         INSTALL_UV: ${INSTALL_UV:-0}
         WORKSPACE: ${WORKSPACE:?set WORKSPACE in .env}

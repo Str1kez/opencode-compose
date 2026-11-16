@@ -213,7 +213,10 @@ readonly PYTHON_PROFILE_APT_PACKAGES="build-essential"
 readonly HEALTH_TIMEOUT_SECONDS=900
 readonly OVERRIDE_FILE="docker-compose.override.yml"
 readonly APT_CONFIG_DIR="docker/apt"
-readonly DEFAULT_UV_REGISTRY="ghcr.io"
+readonly DEFAULT_UV_PIP_INDEX_URL="https://pypi.org/simple"
+# https only: pip ignores a plain http index unless told --trusted-host. Host, optional port
+# and path; no user:password@, the index takes only a URL.
+readonly UV_PIP_INDEX_URL_PATTERN='^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~%+/-]*)?$'
 readonly KNOWN_HOSTS_FILE=".git-ssh/known_hosts"
 readonly CONTAINER_GIT_KEY="/run/git-ssh/id"
 readonly CONTAINER_KNOWN_HOSTS="/run/git-ssh/known_hosts"
@@ -323,6 +326,46 @@ saved_git_ssh_flag() {
 # Prints 1 when the python profile was enabled by an earlier run, else 0.
 saved_python_profile_flag() {
   if [[ "$(_existing INSTALL_UV || true)" == "1" ]]; then printf '1'; else printf '0'; fi
+}
+
+# drop_env KEY removes KEY from ENV_FILE, keeping the file's mode like write_env does.
+drop_env() {
+  local key="$1" tmp
+  [[ -f "$ENV_FILE" ]] && grep -qE "^${key}=" "$ENV_FILE" || return 0
+  tmp=$(mktemp)
+  grep -vE "^${key}=" "$ENV_FILE" > "$tmp" || true
+  cat "$tmp" > "$ENV_FILE"
+  rm -f "$tmp"
+  printf '  %s✓ removed%s %s from %s\n' "$GREEN" "$RESET" "$key" "$ENV_FILE"
+}
+
+# Asks whether this is a python project, with the saved answer as the Enter default, and
+# writes INSTALL_UV (1/0). With the profile on, also asks the PyPI index uv is installed
+# from and writes UV_PIP_INDEX_URL. Drops UV_REGISTRY, left by the uv-image setup.
+# Not a yes/no return on purpose: inside `if` set -e is off, and an EOF in the index loop
+# would spin forever instead of stopping the wizard.
+configure_python_profile() {
+  local saved question
+  saved=$(saved_python_profile_flag)
+  if [[ "$saved" == 1 ]]; then
+    question="Оставить питон-профиль?"
+  else
+    question="Это питон-проект? Включить питон-профиль?"
+  fi
+  drop_env UV_REGISTRY
+  if ! confirm_default "$saved" "$question"; then
+    write_env INSTALL_UV 0
+    return 0
+  fi
+  write_env INSTALL_UV 1
+  while true; do
+    ask UV_PIP_INDEX_URL "PyPI-индекс, откуда ставится uv [$DEFAULT_UV_PIP_INDEX_URL], корпоративный, если pypi.org закрыт:" \
+      || return 1
+    UV_PIP_INDEX_URL="${UV_PIP_INDEX_URL:-$DEFAULT_UV_PIP_INDEX_URL}"
+    [[ "$UV_PIP_INDEX_URL" =~ $UV_PIP_INDEX_URL_PATTERN ]] && break
+    warn "индекс: https-адрес без логина, например https://nexus.example.corp/repository/pypi/simple"
+  done
+  write_env UV_PIP_INDEX_URL "$UV_PIP_INDEX_URL"
 }
 
 # True when a docker endpoint (unix:///path/to/docker.sock) lives in colima's home.
@@ -1128,26 +1171,12 @@ say "Питон-профиль: $PYTHON_PROFILE_APT_PACKAGES (gcc для сбо�
 say "Системный питон не ставится: uv приносит свой при uv sync. У контейнера свой .venv"
 say "поверх WORKSPACE/.venv, хостовый он не видит и не трогает."
 default_packages=""
-python_saved=$(saved_python_profile_flag)
-if [[ "$python_saved" == 1 ]]; then
-  python_question="Оставить питон-профиль?"
-else
-  python_question="Это питон-проект? Включить питон-профиль?"
-fi
-if confirm_default "$python_saved" "$python_question"; then
-  write_env INSTALL_UV 1
+configure_python_profile
+if [[ "$INSTALL_UV" == 1 ]]; then
   default_packages="$PYTHON_PROFILE_APT_PACKAGES"
-  while true; do
-    ask UV_REGISTRY "Registry для образа uv [$DEFAULT_UV_REGISTRY], зеркало, если ghcr.io закрыт:"
-    UV_REGISTRY="${UV_REGISTRY:-$DEFAULT_UV_REGISTRY}"
-    [[ "$UV_REGISTRY" =~ ^[A-Za-z0-9][A-Za-z0-9.:/_-]*$ ]] && break
-    warn "registry: хост и путь, например nexus.example.corp:8443"
-  done
-  write_env UV_REGISTRY "$UV_REGISTRY"
   say "Нативным зависимостям нужны dev-библиотеки: допиши их к профилю,"
   say "например: $PYTHON_PROFILE_APT_PACKAGES libpq-dev libffi-dev. Сам визард их не угадывает."
 else
-  write_env INSTALL_UV 0
   say "Тулчейн проекта ставится apt-пакетами в образ."
 fi
 while true; do

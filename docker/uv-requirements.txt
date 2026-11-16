@@ -1,0 +1,9 @@
+# uv for the python profile, installed by pip in a throwaway build stage (docker/Dockerfile).
+# Hashes pin the linux glibc wheels for amd64 and arm64 (colima on Apple silicon builds
+# arm64); pip picks the wheel for the build platform and refuses one with another hash.
+# Bumping uv: take the sha256 of every manylinux x86_64 and aarch64 wheel of the new
+# version from https://pypi.org/pypi/uv/<version>/json.
+uv==0.13.8 \
+    --hash=sha256:e18a57b8b352eb7c8feb317b9f6f533c8f0ad9673fd6cf34bbe3cf1a9f6a8984 \
+    --hash=sha256:0b3e8b1a4f5e405e31e2ff33de8af4744831e9f7338539671efbd8c3c94e791d \
+    --hash=sha256:5337c30bb893b4f9ce0ceb921ba2da0d13f649da644f40ad3bef84083bef0203

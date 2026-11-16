@@ -40,6 +40,29 @@ printf "GIT_SSH_COMMAND='ssh -i /run/git-ssh/id'\nINSTALL_UV='1'\n" > "$work/rer
 )
 pass "re-run: saved git push and python profile are the Enter default"
 
+# uv comes from a PyPI index now: a re-run on an .env of the uv-image setup drops UV_REGISTRY,
+# keeps the profile and asks for the index; a malformed index URL is asked again.
+mkdir -p "$work/uv-index"
+(
+  ENV_FILE="$work/uv-index/.env"
+  printf "INSTALL_UV='1'\nUV_REGISTRY='nexus.example.corp:8443'\n" > "$ENV_FILE"
+  configure_python_profile > /dev/null <<< $'\nftp://nexus.example.corp/simple\nhttp://nexus.example.corp/simple\nnexus.example.corp\n\n'
+  [[ "$(_existing INSTALL_UV)" == 1 ]] || fail "Enter on re-run turned the python profile off"
+  ! grep -q '^UV_REGISTRY=' "$ENV_FILE" || fail "UV_REGISTRY survived the re-run"
+  [[ "$(_existing UV_PIP_INDEX_URL)" == "https://pypi.org/simple" ]] \
+    || fail "Enter after rejected URLs did not give the default index"
+
+  index="https://nexus.example.corp/repository/pypi/simple"
+  configure_python_profile > /dev/null <<< $'\n'"$index"$'\n'
+  [[ "$(_existing UV_PIP_INDEX_URL)" == "$index" ]] || fail "typed index not saved"
+  configure_python_profile > /dev/null <<< $'\n\n'
+  [[ "$(_existing UV_PIP_INDEX_URL)" == "$index" ]] || fail "Enter did not keep the saved index"
+
+  configure_python_profile > /dev/null <<< "n"
+  [[ "$(_existing INSTALL_UV)" == 0 ]] || fail "explicit n kept the python profile"
+)
+pass "uv index: UV_REGISTRY dropped on re-run, index asked with a default, bad URL rejected"
+
 # Key path validation (item 3): absolute and resolved, no characters that break the mount.
 mkdir -p "$work/home/.ssh"
 : > "$work/home/.ssh/id_x"
@@ -179,7 +202,7 @@ mkdir -p "$work/project"
   first_port=$(_existing OPENCODE_PORT)
   [[ "$first_project" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || fail "invalid compose project name: $first_project"
   [[ "$first_project" != opencode ]] || fail "first run kept the shared project name"
-  [[ "$first_port" =~ ^[0-9]+$ ]] && (( first_port > 1024 && first_port <= 65535 )) \
+  { [[ "$first_port" =~ ^[0-9]+$ ]] && (( first_port > 1024 && first_port <= 65535 )); } \
     || fail "bad derived port: $first_port"
 
   save_workspace_identity "/work/a/b-c" "/work/a-b/c" > /dev/null
