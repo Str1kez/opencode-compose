@@ -598,3 +598,13 @@ printf 'gitlab.example.invalid %s\n' "$(cut -d' ' -f1,2 "$kh/hostkeys/gitlab.exa
   grep -q 'ssh' "$pc/log" || fail "push check without ssh remotes is silent: $(cat "$pc/log")"
 )
 pass "push check: one dry-run per known ssh host from a repository on it, nothing to check is said"
+
+# A read-only mount (a symlink target, the skills folder) may hold " or $: compose must take
+# it literally, as it does the .venv targets.
+(
+  VENV_OVERLAYS=()
+  write_override_file "$work/ro-mount.yml" '/x/q"uo$te:/x/q"uo$te'
+  grep -qF -- '- "/x/q\"uo$$te:/x/q\"uo$$te:ro"' "$work/ro-mount.yml" \
+    || fail "read-only mount not quoted for compose: $(cat "$work/ro-mount.yml")"
+)
+pass "override: read-only mount with \" and \$ quoted for compose"

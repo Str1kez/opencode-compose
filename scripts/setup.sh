@@ -960,7 +960,7 @@ write_override_file() {
     fi
     printf '    volumes:\n'
     for mount in "$@"; do
-      printf '      - "%s:ro"\n' "$mount"
+      printf '      - "%s:ro"\n' "$(compose_escape "$mount")"
     done
     for overlay in ${VENV_OVERLAYS[@]+"${VENV_OVERLAYS[@]}"}; do
       printf '      - type: volume\n        source: %s\n        target: "%s"\n' \
