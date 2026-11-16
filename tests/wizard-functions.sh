@@ -326,3 +326,35 @@ mkdir -p "$work/ws-nested/.git" "$work/ws-nested/libs/inner/.git" \
     || fail "folder of repositories that is not a repository got a warning"
 )
 pass "workspace folder: #51191 warning only for a repository with nested repositories"
+
+# colima mount probe for a workspace folder that is not a repository (ADR 0005): the marker is
+# any entry of the folder; 0 when the VM sees it, 1 when the VM has an empty directory there,
+# 2 only when the folder itself is empty.
+mkdir -p "$work/folder-seen/it's a repo" "$work/folder-unseen/other" "$work/folder-empty"
+(
+  # shellcheck disable=SC2034  # read by colima_sees_workspace from wizard-lib.sh
+  COLIMA_PROFILE=default
+  vm_hides=""
+  colima() {
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    local script
+    script=$(cat)
+    # The VM sees every host path except the hidden one, where docker left an empty directory.
+    [[ -n "$vm_hides" && "$script" == *"$vm_hides"* ]] && return 1
+    sh -c "$script"
+  }
+  rc=0
+  colima_sees_workspace "$work/folder-seen" || rc=$?
+  [[ "$rc" == 0 ]] || fail "folder of repositories without .git, visible in the VM: got $rc"
+
+  vm_hides="$work/folder-unseen"
+  rc=0
+  colima_sees_workspace "$work/folder-unseen" || rc=$?
+  [[ "$rc" == 1 ]] || fail "folder of repositories without .git, hidden from the VM: got $rc"
+
+  rc=0
+  colima_sees_workspace "$work/folder-empty" || rc=$?
+  [[ "$rc" == 2 ]] || fail "empty workspace folder must be unverifiable: got $rc"
+)
+pass "colima probe: workspace folder without .git is checked by any of its entries"
