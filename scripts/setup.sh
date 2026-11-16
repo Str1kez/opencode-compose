@@ -769,33 +769,79 @@ normalize_key_path() {
   printf '%s' "$path"
 }
 
-# Interactive part of the "Git-доступ по SSH" stage. On success appends the key and
-# known_hosts mounts to extra_mounts and sets git_ssh_command; fails when the user skips.
+lowercase() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# The name ssh-keyscan writes and ssh looks up in known_hosts: HOST, or [HOST]:PORT off 22.
+known_hosts_name() {
+  if [[ "$2" == 22 ]]; then printf '%s' "$1"; else printf '[%s]:%s' "$1" "$2"; fi
+}
+
+# "host port" per ssh host and the remote URLs that push there, filled by collect_ssh_hosts.
+SSH_HOSTS=()
+SSH_REMOTES=()
+
+# collect_ssh_hosts WORKSPACE fills SSH_HOSTS with the hosts of the remotes of every repository
+# in WORKSPACE, each host once (lowercased, as ssh looks it up), and SSH_REMOTES with those
+# remotes. A repository without a remote, with a non-ssh remote or with an ~/.ssh/config alias
+# is skipped with a message: the container has no ~/.ssh/config.
+collect_ssh_hosts() {
+  local workspace="$1" repo url host_port host port resolved real_host real_port real_user entry known
+  SSH_HOSTS=()
+  SSH_REMOTES=()
+  while IFS= read -r repo; do
+    # A path with a newline arrives in pieces that are no repository.
+    [[ -e "$repo/.git" ]] || continue
+    if ! url=$(workspace_remote_url "$repo"); then
+      note "в $repo нет git remote, пропускаю"
+      continue
+    fi
+    if ! host_port=$(ssh_remote_host "$url"); then
+      warn "$repo: remote $url не ssh, пропускаю. Пока поддержан только push по ssh."
+      continue
+    fi
+    read -r host port <<< "$host_port"
+    if resolved=$(ssh_resolved "$host"); then
+      read -r real_host real_port real_user <<< "$resolved"
+      if [[ "$(lowercase "$real_host")" != "$(lowercase "$host")" ]]; then
+        warn "$repo: $host — псевдоним из ~/.ssh/config (на самом деле $real_host:$real_port). В контейнере этого конфига нет."
+        warn "Remote через псевдоним не поддержан, пропускаю. Перепиши его на настоящий хост:"
+        step "git -C $repo remote set-url $(workspace_remote_name "$repo") $(explicit_remote_url "$url" "$real_host" "$real_port" "$real_user")"
+        continue
+      fi
+    fi
+    SSH_REMOTES+=("$url")
+    host=$(lowercase "$host")
+    known=0
+    for entry in ${SSH_HOSTS[@]+"${SSH_HOSTS[@]}"}; do
+      [[ "$entry" == "$host $port" ]] && known=1
+    done
+    (( known )) || SSH_HOSTS+=("$host $port")
+  done < <(workspace_dirs_with "$workspace" .git)
+}
+
+# Interactive part of the "Git-доступ по SSH" stage. One key for the whole workspace folder;
+# known_hosts gets every ssh host of its repositories. A host already in $KNOWN_HOSTS_FILE is
+# kept as is, a new one is written only after its fingerprint is confirmed. On success appends
+# the key and known_hosts mounts to extra_mounts and sets git_ssh_command; fails when the user
+# skips or no host ends up in known_hosts.
 configure_git_ssh() {
-  local remote_url host_port host port keys key choice scan resolved real_host real_port real_user
+  local keys key choice scan entry host port name kept planned remote
   if ! command -v git >/dev/null 2>&1 || ! command -v ssh-keyscan >/dev/null 2>&1; then
     warn "на хосте нет git или ssh-keyscan, настроить push не получится"
     return 1
   fi
-  if ! remote_url=$(workspace_remote_url "$WORKSPACE"); then
-    warn "в $WORKSPACE нет git remote, пушить некуда"
+  collect_ssh_hosts "$WORKSPACE"
+  if (( ${#SSH_HOSTS[@]} == 0 )); then
+    warn "в $WORKSPACE нет репозиториев с ssh-remote, пушить некуда"
     return 1
   fi
-  if ! host_port=$(ssh_remote_host "$remote_url"); then
-    warn "remote $remote_url не ssh. Пока поддержан только push по ssh."
-    return 1
-  fi
-  read -r host port <<< "$host_port"
-  if resolved=$(ssh_resolved "$host"); then
-    read -r real_host real_port real_user <<< "$resolved"
-    if [[ "$(printf '%s' "$real_host" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')" ]]; then
-      warn "$host — псевдоним из ~/.ssh/config (на самом деле $real_host:$real_port). В контейнере этого конфига нет."
-      warn "Remote через псевдоним не поддержан. Перепиши его на настоящий хост:"
-      step "git -C $WORKSPACE remote set-url $(workspace_remote_name "$WORKSPACE") $(explicit_remote_url "$remote_url" "$real_host" "$real_port" "$real_user")"
-      return 1
-    fi
-  fi
-  say "Remote: $remote_url (хост $host, порт $port)"
+  say "Хосты, куда пушат репозитории рабочей папки:"
+  for entry in "${SSH_HOSTS[@]}"; do
+    read -r host port <<< "$entry"
+    step "$host, порт $port"
+  done
 
   keys=$(ssh_private_keys)
   if [[ -z "$keys" ]]; then
@@ -833,23 +879,50 @@ configure_git_ssh() {
     say "  ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_deploy"
   done
   write_env GIT_SSH_KEY "$key"
-
   printf '\n'
-  step "ssh-keyscan $host:$port"
-  scan=$(ssh-keyscan -T 10 -p "$port" "$host" 2>/dev/null || true)
-  if [[ -z "$scan" ]]; then
-    warn "хост $host:$port не ответил на ssh-keyscan"
-    return 1
-  fi
-  say "Ключи хоста. Сверь fingerprint с опубликованным у провайдера (у GitHub и GitLab он"
-  say "есть в документации) или спроси у админа сервера:"
-  ssh-keygen -lf - <<< "$scan" | while IFS= read -r line; do step "$line"; done
-  if ! confirm "Fingerprint совпадает?"; then
-    warn "fingerprint не подтверждён, known_hosts не пишу"
+  say "Один ключ на всю рабочую папку. Добавь его публичную часть (ssh-keygen -y -f $key)"
+  say "deploy-ключом с правом записи в каждый GitLab-проект, куда пушит агент:"
+  for remote in "${SSH_REMOTES[@]}"; do step "$remote"; done
+  note "Визард это не проверяет: без ключа в проекте push туда не пройдёт."
+
+  # Built aside and written only when at least one host made it, so a refusal never leaves a
+  # half-written or emptied known_hosts behind.
+  planned=$(mktemp)
+  for entry in "${SSH_HOSTS[@]}"; do
+    read -r host port <<< "$entry"
+    name=$(known_hosts_name "$host" "$port")
+    printf '\n'
+    if [[ -f "$KNOWN_HOSTS_FILE" ]] \
+      && kept=$(ssh-keygen -F "$name" -f "$KNOWN_HOSTS_FILE" 2>/dev/null | grep -v '^#'); then
+      printf '%s\n' "$kept" >> "$planned"
+      say "✓ $name уже в $KNOWN_HOSTS_FILE, сверка была раньше"
+      continue
+    fi
+    step "ssh-keyscan $host:$port"
+    scan=$(ssh-keyscan -T 10 -p "$port" "$host" 2>/dev/null || true)
+    if [[ -z "$scan" ]]; then
+      warn "хост $host:$port не ответил на ssh-keyscan, в known_hosts его не будет"
+      SKIPPED+=("known_hosts: $host:$port не ответил, push туда не пройдёт; запусти визард снова")
+      continue
+    fi
+    say "Ключи хоста $name. Сверь fingerprint с опубликованным у провайдера (у GitHub и"
+    say "GitLab он есть в документации) или спроси у админа сервера:"
+    ssh-keygen -lf - <<< "$scan" | while IFS= read -r line; do step "$line"; done
+    if ! confirm "Fingerprint совпадает?"; then
+      warn "fingerprint $name не подтверждён, в known_hosts его не пишу"
+      SKIPPED+=("known_hosts: fingerprint $host:$port не подтверждён, push туда не пройдёт")
+      continue
+    fi
+    printf '%s\n' "$scan" >> "$planned"
+  done
+  if [[ ! -s "$planned" ]]; then
+    rm -f "$planned"
+    warn "ни один хост не попал в known_hosts, $KNOWN_HOSTS_FILE не трогаю"
     return 1
   fi
   mkdir -p "$(dirname "$KNOWN_HOSTS_FILE")"
-  printf '%s\n' "$scan" > "$KNOWN_HOSTS_FILE"
+  cat "$planned" > "$KNOWN_HOSTS_FILE"
+  rm -f "$planned"
   say "✓ записал $KNOWN_HOSTS_FILE"
 
   extra_mounts+=("$key:$CONTAINER_GIT_KEY" "$PWD/$KNOWN_HOSTS_FILE:$CONTAINER_KNOWN_HOSTS")
@@ -1064,9 +1137,7 @@ save_workspace_identity() {
 warn_nested_repositories() {
   local workspace="$1"
   [[ -e "$workspace/.git" ]] || return 0
-  # No -mindepth: it would skip the prune test on top-level node_modules and .venv.
-  find "$workspace" \( -name .git -o -name .venv -o -name node_modules \) -prune \
-    -name .git -print | grep -qvxF "$workspace/.git" || return 0
+  workspace_dirs_with "$workspace" .git | grep -qvxF "$workspace" || return 0
   warn "$workspace сам git-репозиторий, и внутри есть вложенные репозитории."
   note "Из-за бага opencode #51191 сессии из подпапки уедут в корень репозитория."
   note "Сделай рабочей папкой родителя без собственного .git или вынеси вложенные репозитории."

@@ -460,3 +460,100 @@ touch "$work/folder-seen/it's a repo/README" "$work/folder-unseen/other/pyprojec
   [[ "$rc" == 2 ]] || fail "workspace folder with no file must be unverifiable: got $rc"
 )
 pass "colima probe: workspace folder without .git is checked by a file, not a mount point"
+
+# Git over ssh for a workspace folder (ADR 0005): hosts come from the remotes of every
+# repository at any depth, a host shared by several repositories is scanned and confirmed once,
+# a refused fingerprint never reaches known_hosts, https and ~/.ssh/config alias remotes are
+# skipped with a message. ssh-keyscan is faked at its boundary with real host keys.
+kh="$work/known-hosts"
+ws="$kh/ws"
+mkdir -p "$kh/home/.ssh" "$kh/hostkeys" "$ws"
+ssh-keygen -q -t ed25519 -N '' -C deploy -f "$kh/home/.ssh/id_deploy"
+for host in gitlab.example.invalid other.example.invalid third.example.invalid; do
+  ssh-keygen -q -t ed25519 -N '' -f "$kh/hostkeys/$host"
+done
+add_repo() {
+  git init -q -b main "$ws/$1"
+  [[ -z "${2:-}" ]] || git -C "$ws/$1" remote add origin "$2"
+}
+add_repo a "git@gitlab.example.invalid:grp/a.git"
+add_repo b/deep/c "ssh://git@GitLab.example.invalid/grp/c.git"
+add_repo d "https://github.com/grp/d.git"
+add_repo e "git@gl-alias:grp/e.git"
+add_repo f "git@other.example.invalid:grp/f.git"
+add_repo g "ssh://git@third.example.invalid:2222/grp/g.git"
+add_repo h
+cat > "$kh/ssh_config" <<'SSHCONF'
+Host gl-alias
+  HostName gitlab.example.invalid
+SSHCONF
+(
+  cd "$kh"
+  HOME="$kh/home"
+  ENV_FILE="$kh/.env"
+  # shellcheck disable=SC2034  # read by configure_git_ssh from wizard-lib.sh
+  WORKSPACE="$ws"
+  ssh() { command ssh -F "$kh/ssh_config" "$@"; }
+  ssh-keyscan() {
+    local port=22 host
+    while (( $# > 1 )); do
+      [[ "$1" == -p ]] && port="$2"
+      shift
+    done
+    host="$1"
+    printf '%s\n' "$host:$port" >> "$kh/scans"
+    [[ -f "$kh/hostkeys/$host.pub" ]] || return 1
+    [[ "$port" == 22 ]] || host="[$host]:$port"
+    printf '%s %s\n' "$host" "$(cut -d' ' -f1,2 "$kh/hostkeys/${1}.pub")"
+  }
+  SKIPPED=()
+  extra_mounts=()
+  # Key 1, then the fingerprints: gitlab yes, other yes, third no.
+  configure_git_ssh > "$kh/log" 2>&1 <<< $'1\ny\ny\nn' || { cat "$kh/log"; fail "workspace folder: git ssh stage failed"; }
+  [[ "$(cat "$kh/scans")" == $'gitlab.example.invalid:22\nother.example.invalid:22\nthird.example.invalid:2222' ]] \
+    || fail "hosts scanned: $(cat "$kh/scans")"
+  [[ "$(grep -c 'Fingerprint совпадает' "$kh/log")" == 3 ]] || fail "each new host must be confirmed exactly once"
+  ssh-keygen -F gitlab.example.invalid -f "$KNOWN_HOSTS_FILE" > /dev/null || fail "confirmed host gitlab not in known_hosts"
+  ssh-keygen -F other.example.invalid -f "$KNOWN_HOSTS_FILE" > /dev/null || fail "confirmed host other not in known_hosts"
+  ! grep -q third "$KNOWN_HOSTS_FILE" || fail "refused host third written to known_hosts"
+  [[ "$(grep -c gitlab "$KNOWN_HOSTS_FILE")" == 1 ]] || fail "shared host written twice"
+  [[ "${SKIPPED[*]}" == *third.example.invalid* ]] || fail "refused host is not in the to-do list: ${SKIPPED[*]}"
+  grep -q "$ws/d.*не ssh" "$kh/log" || fail "https remote not reported as skipped"
+  grep -q 'псевдоним' "$kh/log" || fail "alias remote not reported"
+  grep -qF "git -C $ws/e remote set-url origin git@gitlab.example.invalid:grp/e.git" "$kh/log" \
+    || fail "no real set-url form for the alias remote"
+  grep -q "$ws/h.*нет git remote" "$kh/log" || fail "repository without a remote not reported"
+  grep -q 'в каждый' "$kh/log" || fail "no reminder to add the key to every project"
+  [[ "$(_existing GIT_SSH_KEY)" == "$kh/home/.ssh/id_deploy" ]] || fail "key not saved"
+  [[ "${extra_mounts[*]}" == "$kh/home/.ssh/id_deploy:$CONTAINER_GIT_KEY $kh/$KNOWN_HOSTS_FILE:$CONTAINER_KNOWN_HOSTS" ]] \
+    || fail "mounts: ${extra_mounts[*]}"
+  gitlab_entry=$(grep gitlab "$KNOWN_HOSTS_FILE")
+
+  # Re-run: Enter keeps the key, only the host refused last time is asked again.
+  : > "$kh/scans"
+  extra_mounts=()
+  configure_git_ssh > "$kh/log" 2>&1 <<< $'\ny' || { cat "$kh/log"; fail "re-run: git ssh stage failed"; }
+  [[ "$(cat "$kh/scans")" == "third.example.invalid:2222" ]] || fail "re-run rescanned known hosts: $(cat "$kh/scans")"
+  [[ "$(grep -c 'Fingerprint совпадает' "$kh/log")" == 1 ]] || fail "re-run asked to confirm a known host"
+  [[ "$(_existing GIT_SSH_KEY)" == "$kh/home/.ssh/id_deploy" ]] || fail "re-run lost the key"
+  [[ "$(grep gitlab "$KNOWN_HOSTS_FILE")" == "$gitlab_entry" ]] || fail "re-run changed a known host"
+  ssh-keygen -F other.example.invalid -f "$KNOWN_HOSTS_FILE" > /dev/null || fail "re-run lost a known host"
+  ssh-keygen -F '[third.example.invalid]:2222' -f "$KNOWN_HOSTS_FILE" > /dev/null || fail "re-run: confirmed host not written"
+)
+pass "git ssh: hosts from every repository, shared host scanned once, refused host kept out, re-run asks only new hosts"
+
+# Refusing the only new host fails the stage and leaves known_hosts as it was.
+mkdir -p "$kh/refuse"
+(
+  cd "$kh/refuse"
+  HOME="$kh/home"
+  ENV_FILE="$kh/refuse/.env"
+  # shellcheck disable=SC2034  # read by configure_git_ssh from wizard-lib.sh
+  WORKSPACE="$ws/f"
+  ssh-keyscan() { printf '%s %s\n' "${!#}" "$(cut -d' ' -f1,2 "$kh/hostkeys/${!#}.pub")"; }
+  if configure_git_ssh > "$kh/refuse/log" 2>&1 <<< $'1\nn'; then
+    fail "refused fingerprint did not fail the stage"
+  fi
+  [[ ! -e "$KNOWN_HOSTS_FILE" ]] || fail "refused fingerprint created known_hosts"
+)
+pass "git ssh: refusing the only new host writes nothing and fails the stage"
