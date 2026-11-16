@@ -524,14 +524,15 @@ sh_quote() {
 }
 
 # Whether WORKSPACE inside the colima VM is the host folder and not an empty directory that
-# docker created on a previous bind of an unmounted path. Probes one entry of the host
-# folder (any: the folder may be a plain folder of repositories with no .git of its own).
-# Returns 0 seen, 1 not seen, 2 can't tell (the host folder is empty).
+# docker created on a previous bind of an unmounted path. Probes one regular file of the
+# host folder: the folder may have no .git of its own, and a directory proves nothing,
+# since docker creates the directories of nested .venv mount points in the VM.
+# Returns 0 seen, 1 not seen, 2 can't tell (the host folder holds no file).
 # The probe goes to the VM's sh on stdin: lima versions differ in whether `colima ssh`
 # quotes its arguments, so a quoted argument is either right or quoted twice.
 colima_sees_workspace() {
   local marker
-  marker=$(find "$1" -mindepth 1 -maxdepth 1 -print -quit)
+  marker=$(find "$1" \( -name .venv -o -name node_modules \) -prune -o -type f -print -quit)
   [[ -n "$marker" ]] || return 2
   printf 'test -e %s\n' "$(sh_quote "$marker")" \
     | colima ssh --profile "$COLIMA_PROFILE" -- sh >/dev/null 2>&1 || return 1
@@ -607,7 +608,7 @@ ensure_colima_workspace() {
   colima_sees_workspace "$workspace" || seen=$?
   case "$seen" in
     0) say "✓ $workspace виден внутри VM colima" ;;
-    2) warn "$workspace пуста, поэтому проверить, видна ли она в VM colima, не могу." ;;
+    2) warn "в $workspace нет ни одного файла, поэтому проверить, видна ли она в VM colima, не могу." ;;
     *)
       warn "$workspace всё ещё не виден в VM colima. Перезапусти её командой выше и запусти визард снова."
       return 1

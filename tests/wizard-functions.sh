@@ -298,6 +298,7 @@ pass "apt config: apt files copied, old set replaced, README kept"
 # colima mount probe: lima 2.x quotes `colima ssh` arguments itself, so a path quoted by the
 # wizard was quoted twice and an existing repository read as "not mounted".
 mkdir -p "$work/colima ws/it's/.git"
+touch "$work/colima ws/it's/.git/HEAD"
 (
   # shellcheck disable=SC2034  # read by colima_sees_workspace from wizard-lib.sh
   COLIMA_PROFILE=default
@@ -328,9 +329,11 @@ mkdir -p "$work/ws-nested/.git" "$work/ws-nested/libs/inner/.git" \
 pass "workspace folder: #51191 warning only for a repository with nested repositories"
 
 # colima mount probe for a workspace folder that is not a repository (ADR 0005): the marker is
-# any entry of the folder; 0 when the VM sees it, 1 when the VM has an empty directory there,
-# 2 only when the folder itself is empty.
-mkdir -p "$work/folder-seen/it's a repo" "$work/folder-unseen/other" "$work/folder-empty"
+# a regular file of the folder; 0 when the VM sees it, 1 when the VM has only the directories
+# docker created there for the .venv mount points, 2 when the folder holds no file at all.
+mkdir -p "$work/folder-seen/it's a repo" "$work/folder-unseen/.venv" "$work/folder-unseen/other/.venv" \
+  "$work/folder-empty/repo/.venv"
+touch "$work/folder-seen/it's a repo/README" "$work/folder-unseen/other/pyproject.toml"
 (
   # shellcheck disable=SC2034  # read by colima_sees_workspace from wizard-lib.sh
   COLIMA_PROFILE=default
@@ -340,8 +343,11 @@ mkdir -p "$work/folder-seen/it's a repo" "$work/folder-unseen/other" "$work/fold
     shift
     local script
     script=$(cat)
-    # The VM sees every host path except the hidden one, where docker left an empty directory.
-    [[ -n "$vm_hides" && "$script" == *"$vm_hides"* ]] && return 1
+    # Under the hidden folder the VM holds only what docker created for bind mount points:
+    # the directories, never a file.
+    if [[ -n "$vm_hides" ]]; then
+      script=${script/test -e /test -d }
+    fi
     sh -c "$script"
   }
   rc=0
@@ -355,6 +361,6 @@ mkdir -p "$work/folder-seen/it's a repo" "$work/folder-unseen/other" "$work/fold
 
   rc=0
   colima_sees_workspace "$work/folder-empty" || rc=$?
-  [[ "$rc" == 2 ]] || fail "empty workspace folder must be unverifiable: got $rc"
+  [[ "$rc" == 2 ]] || fail "workspace folder with no file must be unverifiable: got $rc"
 )
-pass "colima probe: workspace folder without .git is checked by any of its entries"
+pass "colima probe: workspace folder without .git is checked by a file, not a mount point"
