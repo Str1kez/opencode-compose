@@ -343,7 +343,7 @@ pass "python projects: top pyproject.toml at any depth, nested and skipped dirs 
 # the list of python repositories and the re-clone warning are printed.
 mkdir -p "$ws/a-b/.venv/bin"
 : > "$ws/a-b/.venv/bin/python"
-collect_venv_overlays "$ws" > "$work/python-ws/log"
+prepare_venv_overlays "$ws" > "$work/python-ws/log"
 out=$(cat "$work/python-ws/log")
 for project in a a-b deep/x/y/svc mono/packages/api; do
   [[ -d "$ws/$project/.venv" ]] || fail "no .venv mount point created in $project"
@@ -364,12 +364,12 @@ done <<< "$names"
 [[ "$(venv_volume_name "/w/one" "/w/one/proj")" != "$(venv_volume_name "/w" "/w/one/proj")" ]] \
   || fail "one project seen from two workspaces shares a venv volume"
 
-collect_venv_overlays "$single" > /dev/null
+prepare_venv_overlays "$single" > /dev/null
 [[ "${VENV_OVERLAYS[*]}" == "$(venv_volume_name "$single") $single/.venv" ]] \
   || fail "workspace as one python repository: ${VENV_OVERLAYS[*]}"
 
 mkdir -p "$work/python-ws/none"
-collect_venv_overlays "$work/python-ws/none" > "$work/python-ws/log"
+prepare_venv_overlays "$work/python-ws/none" > "$work/python-ws/log"
 out=$(cat "$work/python-ws/log")
 (( ${#VENV_OVERLAYS[@]} == 0 )) || fail "overlays without python projects"
 [[ "$out" == *"перезапусти визард"* ]] || fail "no re-run warning without python repositories"
@@ -608,3 +608,18 @@ pass "push check: one dry-run per known ssh host from a repository on it, nothin
     || fail "read-only mount not quoted for compose: $(cat "$work/ro-mount.yml")"
 )
 pass "override: read-only mount with \" and \$ quoted for compose"
+
+# The end of the wizard lists the python projects again (US12), so a lost one shows up there.
+sp="$work/summary-python"
+mkdir -p "$sp/svc/api" "$sp/lib" "$work/summary-none"
+: > "$sp/svc/api/pyproject.toml"
+: > "$sp/lib/pyproject.toml"
+(
+  prepare_venv_overlays "$sp" > /dev/null
+  out=$(show_python_projects "$sp")
+  [[ "$out" == *"lib"* && "$out" == *"svc/api"* ]] || fail "summary misses a python project: $out"
+
+  prepare_venv_overlays "$work/summary-none" > /dev/null
+  [[ -n "$(show_python_projects "$work/summary-none")" ]] || fail "summary without python projects is silent"
+)
+pass "summary: python projects listed again at the end"

@@ -220,7 +220,7 @@ readonly UV_PIP_INDEX_URL_PATTERN='^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9
 readonly KNOWN_HOSTS_FILE=".git-ssh/known_hosts"
 readonly CONTAINER_GIT_KEY="/run/git-ssh/id"
 readonly CONTAINER_KNOWN_HOSTS="/run/git-ssh/known_hosts"
-# "VOLUME TARGET" per python project, filled by collect_venv_overlays, written by
+# "VOLUME TARGET" per python project, filled by prepare_venv_overlays, written by
 # write_override_file.
 VENV_OVERLAYS=()
 
@@ -1068,10 +1068,10 @@ venv_volume_name() {
   printf 'opencode-venv-%s' "$(workspace_slug "$project" "$workspace"$'\n'"$project")"
 }
 
-# collect_venv_overlays WORKSPACE fills VENV_OVERLAYS with "VOLUME TARGET" for the .venv of
+# prepare_venv_overlays WORKSPACE fills VENV_OVERLAYS with "VOLUME TARGET" for the .venv of
 # every top python project, creates a missing host .venv as the mount point (otherwise
 # Docker creates it, as root on Linux) and prints the projects with the re-run warning.
-collect_venv_overlays() {
+prepare_venv_overlays() {
   local workspace="$1" project
   VENV_OVERLAYS=()
   while IFS= read -r project; do
@@ -1082,6 +1082,15 @@ collect_venv_overlays() {
     fi
     VENV_OVERLAYS+=("$(venv_volume_name "$workspace" "$project") $project/.venv")
   done < <(python_projects "$workspace")
+  show_python_projects "$workspace"
+  warn "склонировал новый питон-репозиторий — перезапусти визард. Без этого у него нет своего"
+  warn ".venv в контейнере, и контейнерный uv sync перезапишет его хостовый .venv."
+}
+
+# show_python_projects WORKSPACE prints the python projects in VENV_OVERLAYS relative to
+# WORKSPACE.
+show_python_projects() {
+  local workspace="$1" project
   if (( ${#VENV_OVERLAYS[@]} == 0 )); then
     say "Питон-репозиториев в $workspace не нашёл."
   else
@@ -1097,8 +1106,6 @@ collect_venv_overlays() {
       fi
     done
   fi
-  warn "склонировал новый питон-репозиторий — перезапусти визард. Без этого у него нет своего"
-  warn ".venv в контейнере, и контейнерный uv sync перезапишет его хостовый .venv."
 }
 
 home_volume_name() {
@@ -1405,7 +1412,7 @@ done
 write_env EXTRA_APT_PACKAGES "$EXTRA_APT_PACKAGES"
 printf '\n'
 # Written to $OVERRIDE_FILE in the "Дополнительные папки" stage.
-collect_venv_overlays "$WORKSPACE"
+prepare_venv_overlays "$WORKSPACE"
 pause "Enter, чтобы продолжить"
 
 # ── 7 ─────────────────────────────────────────────────────────────────────
@@ -1551,6 +1558,8 @@ say "Ключи провайдеров хранятся в базе opencode, а
 say "подключи провайдера в веб-интерфейсе или так:"
 say "  docker compose exec opencode opencode auth login --server http://127.0.0.1:4096"
 say "Лог: docker compose logs -f    Остановить: docker compose down"
+printf '\n'
+show_python_projects "$WORKSPACE"
 printf '\n'
 }
 
