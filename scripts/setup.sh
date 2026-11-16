@@ -1300,13 +1300,17 @@ say "это может занять несколько минут."
 if ! confirm "Запускать?"; then
   SKIPPED+=("запуск: docker compose up -d --build")
 else
+  # The failure branches pause: finish clears the screen, and the error would go with it.
   if ! docker compose up -d --build; then
-    warn "сборка или запуск упали, вывод выше"
+    warn "сборка или запуск упали, вывод выше. Полный лог сборки по шагам:"
+    say "  docker compose --progress plain build"
     SKIPPED+=("запуск: разберись с ошибкой и повтори docker compose up -d --build")
+    pause "Enter, когда прочитал ошибку"
   elif ! wait_until_ready "$server_url/"; then
     warn "сервер не ответил за $((HEALTH_TIMEOUT_SECONDS / 60)) минут. Последние строки лога:"
     docker compose logs --tail 30 || true
     SKIPPED+=("запуск: смотри docker compose logs -f")
+    pause "Enter, когда прочитал лог"
   else
     if [[ "$(saved_git_ssh_flag)" == 1 ]]; then
       check_git_push_from_container
