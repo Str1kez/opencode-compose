@@ -2,3 +2,10 @@
 *
 !docker
 !docker/**
+# Of docker/apt only what apt-install.sh reads: the folder is a bind mount of every apt
+# step, and editing README.md or a stray .DS_Store would otherwise rebuild them all.
+docker/apt/*
+!docker/apt/*.sources
+!docker/apt/*.list
+!docker/apt/*.conf
+!docker/apt/*.crt
