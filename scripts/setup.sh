@@ -1669,7 +1669,7 @@ stage "Сборка и запуск"
 server_url="http://localhost:$OPENCODE_PORT"
 say "Соберу образ и подниму контейнер. При первом запуске он скачивает opencode с npm,"
 say "это может занять несколько минут."
-if ! confirm "Запускать?"; then
+if ! confirm_default 1 "Запускать?"; then
   SKIPPED+=("запуск: docker compose up -d --build")
 else
   # The failure branches pause: finish clears the screen, and the error would go with it.
