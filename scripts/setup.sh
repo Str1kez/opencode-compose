@@ -1160,9 +1160,10 @@ check_git_push_from_container() {
   for entry in "${SSH_HOSTS[@]}"; do
     read -r host port _ <<< "$entry"
     repo="${entry#* * }"
-    [[ -f "$KNOWN_HOSTS_FILE" ]] \
-      && ssh-keygen -F "$(known_hosts_name "$host" "$port")" -f "$KNOWN_HOSTS_FILE" > /dev/null 2>&1 \
-      || continue
+    if [[ ! -f "$KNOWN_HOSTS_FILE" ]] \
+      || ! ssh-keygen -F "$(known_hosts_name "$host" "$port")" -f "$KNOWN_HOSTS_FILE" > /dev/null 2>&1; then
+      continue
+    fi
     checked=1
     remote=$(workspace_remote_name "$repo")
     step "git -C $repo push --dry-run $remote HEAD из контейнера"

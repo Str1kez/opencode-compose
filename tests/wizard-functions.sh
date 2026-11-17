@@ -5,6 +5,9 @@
 # engine detection. The docker CLI and the ssh config are faked at their boundary.
 #
 # Usage: tests/wizard-functions.sh
+# SC2016: a literal $ in single quotes is test data (quoting, command substitution in names).
+# SC2030, SC2031: every case runs in a subshell on purpose, so its globals don't leak.
+# shellcheck disable=SC2016,SC2030,SC2031
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -785,8 +788,9 @@ mkdir -p "$os_dir"
   VENV_OVERLAYS=("opencode-venv-w-3 /w/.venv")
   ! apply_override > "$os_dir/log" 2>&1 <<< "n" || fail "declined override reported as applied"
   grep -q 'теряют' "$os_dir/log" || fail "dropped overlays not warned about: $(cat "$os_dir/log")"
-  grep -qF '/w/a' "$os_dir/log" && grep -qF '/w/b' "$os_dir/log" \
-    || fail "projects that lose their overlay not listed: $(cat "$os_dir/log")"
+  for project in /w/a /w/b; do
+    grep -qF "$project" "$os_dir/log" || fail "$project lost its overlay but is not listed: $(cat "$os_dir/log")"
+  done
   [[ "$(cat "$OVERRIDE_FILE")" == "$before" ]] || fail "declined override was rewritten"
 
   VENV_OVERLAYS=("opencode-venv-a-1 /w/a/.venv" "opencode-venv-b-2 /w/b/.venv" "opencode-venv-c-4 /w/c/.venv")

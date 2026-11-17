@@ -47,6 +47,7 @@ uv_index="https://pypi.org/simple"
 host_before=$(find "$ws" -path '*/.venv/*' -type f -exec shasum {} + | sort)
 
 # The smoke's own volume names.
+# shellcheck disable=SC2034 # read by write_override_file from the wizard library
 VENV_OVERLAYS=("$project-venv-a $ws/a/.venv" "$project-venv-b $ws/group/b/.venv")
 write_override_file "$work/override.yml"
 
