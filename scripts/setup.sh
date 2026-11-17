@@ -855,6 +855,8 @@ choose_workspace() {
     if paths_overlap "$WORKSPACE" "$harness"; then
       warn "$WORKSPACE и харнесс $harness вложены друг в друга. Агент перепишет compose-файлы"
       warn "и скрипты харнесса и прочитает его .env, а следующий up выполнит это на хосте."
+      note "Перенеси харнесс за пределы рабочей папки (например, в ~/opencode-compose) или выбери"
+      note "папку уже. Подробности: docs/setup/workspace.md"
       continue
     fi
     return 0
@@ -1668,7 +1670,7 @@ pause "Enter, чтобы продолжить"
 # ── 11 ────────────────────────────────────────────────────────────────────
 stage "Сборка и запуск"
 server_url="http://localhost:$OPENCODE_PORT"
-say "Соберу образ и подниму контейнер. При первом запуске он скачивает opencode с npm,"
+say "Соберу образ и подниму контейнер. При первом запуске он скачивает opencode с opencode.ai,"
 say "это может занять несколько минут."
 if ! confirm_default 1 "Запускать?"; then
   SKIPPED+=("запуск: docker compose up -d --build")
