@@ -14,7 +14,9 @@ RUN mkdir /out
 # (no system python there, ADR 0003). python3-pip comes through the same corporate apt
 # setup and CAs as the final image.
 FROM base AS uv-1
-RUN --mount=type=bind,source=docker/apt,target=/tmp/apt \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=bind,source=docker/apt,target=/tmp/apt \
     --mount=type=bind,source=docker/apt-install.sh,target=/tmp/apt-install.sh \
     bash /tmp/apt-install.sh python3-pip
 # Declared after the apt step, so another index doesn't redo it. Only this stage sees it:
@@ -23,10 +25,11 @@ ARG UV_PIP_INDEX_URL=https://pypi.org/simple
 # --target: Debian marks its python externally managed (PEP 668) and pip refuses to
 # install into it; a target directory is not that environment, so nothing is overridden.
 # --only-binary: uv's sdist builds through Rust. --cert: the system bundle, which holds
-# the corporate *.crt from docker/apt after apt-install.sh.
-RUN --mount=type=bind,source=docker/uv-requirements.txt,target=/tmp/uv-requirements.txt \
+# the corporate *.crt from docker/apt after apt-install.sh. The pip cache is a BuildKit
+# cache mount, not a layer; --require-hashes still checks every file taken from it.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,source=docker/uv-requirements.txt,target=/tmp/uv-requirements.txt \
     python3 -m pip install \
-        --no-cache-dir \
         --disable-pip-version-check \
         --index-url "$UV_PIP_INDEX_URL" \
         --cert /etc/ssl/certs/ca-certificates.crt \
@@ -52,12 +55,11 @@ LABEL org.opencontainers.image.title="opencode-compose" \
 # socat: forwards HOST_LOOPBACK_PORTS from the container's 127.0.0.1 to the host.
 # make: most projects run their tasks through a Makefile, and the agent calls it too.
 # bash, tar and tzdata are already in debian slim, so they are not listed.
-# EXTRA_APT_PACKAGES: the project's toolchain, e.g. "build-essential libpq-dev" for a
-# python project. No system python or python3-dev: `uv sync` brings a standalone
-# python with headers. No version pins: BASE_IMAGE is arbitrary and pins would not
-# resolve on another one.
-ARG EXTRA_APT_PACKAGES=""
-RUN --mount=type=bind,source=docker/apt,target=/tmp/apt \
+# No version pins: BASE_IMAGE is arbitrary and pins would not resolve on another one.
+# apt lists and downloaded .debs stay in BuildKit cache mounts between builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=bind,source=docker/apt,target=/tmp/apt \
     --mount=type=bind,source=docker/apt-install.sh,target=/tmp/apt-install.sh \
     bash /tmp/apt-install.sh \
         curl \
@@ -66,8 +68,18 @@ RUN --mount=type=bind,source=docker/apt,target=/tmp/apt \
         openssh-client \
         procps \
         ripgrep \
-        socat \
-        ${EXTRA_APT_PACKAGES}
+        socat
+
+# EXTRA_APT_PACKAGES: the project's toolchain, e.g. "build-essential libpq-dev" for a
+# python project. No system python or python3-dev: `uv sync` brings a standalone
+# python with headers. Declared after the base packages and installed in a step of its
+# own, so another list reinstalls only the extras.
+ARG EXTRA_APT_PACKAGES=""
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=bind,source=docker/apt,target=/tmp/apt \
+    --mount=type=bind,source=docker/apt-install.sh,target=/tmp/apt-install.sh \
+    if [ -n "$EXTRA_APT_PACKAGES" ]; then bash /tmp/apt-install.sh $EXTRA_APT_PACKAGES; fi
 
 ARG OPENCODE_UID=1000
 ARG OPENCODE_GID=1000
