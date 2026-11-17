@@ -8,7 +8,8 @@
 - [x] Прогнать визард вживую на colima: happy path с WORKSPACE внутри `$HOME` прошёл. Не тестировались WORKSPACE вне `$HOME`, путь с пробелами, профиль colima не default и Docker Desktop.
 - [x] Рабочая папка вместо репозитория: узкая папка, один контейнер, `.venv`-volume на питон-проект, один deploy-ключ. Спека `.scratch/workspace-folder/spec.md`, ADR 0005, тикеты 01-04.
 - [ ] Живая проверка рабочей папки на рабочем маке (минимум два питон-проекта и один репозиторий без питона, переключение проектов в браузере): тикет `.scratch/workspace-folder/issues/05-live-check-on-work-mac.md`.
-- [ ] Дать README человеку, который харнесс не видел, и поднять по нему: тикет `.scratch/engine-git/issues/03`.
+- [ ] Дать README и `docs/setup/` человеку, который харнесс не видел, и поднять по ним, в том числе через агента по `AGENTS.md`: тикет `.scratch/engine-git/issues/03`.
+- [x] Разнести README по `docs/setup/`, расписать запрет харнесса в рабочей папке, вычистить устаревшее, дать агенту в `AGENTS.md` маршрут установки.
 - [x] Доработки образа и compose по аудиту: апдейтер, compose-проект на репозиторий, ужесточение compose, гигиена Dockerfile, README про прокси. Тикеты `.scratch/image-hardening/issues/01-05`.
 - [ ] Аудит изоляции агента: домашка на репозиторий сделана (`.scratch/agent-containment/issues/02`), побег на хост через `.git` ждёт решения (`.scratch/agent-containment/issues/01`).
 - [x] uv в образ через pip из корпоративного PyPI-индекса вместо образа с ghcr.io: тикет `.scratch/uv-via-pip/issues/01`.
