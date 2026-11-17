@@ -404,6 +404,38 @@ configure_python_profile() {
   write_env UV_PIP_INDEX_URL "$UV_PIP_INDEX_URL"
 }
 
+# Prints 1 when host ports should be forwarded by default: an earlier run saved some, or
+# this is the first run and the config reaches FOUND ports on the loopback. Else 0.
+saved_host_ports_flag() {
+  local found="$1"
+  if [[ -n "$(_existing HOST_LOOPBACK_PORTS || true)" ]]; then
+    printf '1'
+  elif [[ -n "$found" ]] && ! grep -qE '^HOST_LOOPBACK_PORTS=' "$ENV_FILE" 2>/dev/null; then
+    printf '1'
+  else
+    printf '0'
+  fi
+}
+
+# Asks which host ports the container forwards from its loopback and writes
+# HOST_LOOPBACK_PORTS. With FOUND ports (from config_loopback_ports) one yes/no forwards
+# exactly them; without, a yes asks for the list. A no forwards nothing and asks nothing
+# else. Not a yes/no return, for the same reason as configure_python_profile.
+configure_host_ports() {
+  local found="$1" ports=""
+  if [[ -n "$found" ]]; then
+    confirm_default "$(saved_host_ports_flag "$found")" "Пробросить эти порты?" && ports="$found"
+  elif confirm_default "$(saved_host_ports_flag "")" "Пробросить порты хоста в контейнер?"; then
+    while true; do
+      ask HOST_LOOPBACK_PORTS "Порты через запятую, например 17321,8080:" || return 1
+      ports="${HOST_LOOPBACK_PORTS// /}"
+      [[ "$ports" =~ ^[0-9]+(,[0-9]+)*$ ]] && break
+      warn "нужен список чисел через запятую, например 17321,8080"
+    done
+  fi
+  write_env HOST_LOOPBACK_PORTS "$ports"
+}
+
 # True when a docker endpoint (unix:///path/to/docker.sock) lives in colima's home.
 endpoint_is_colima() {
   local path="${1#unix://}"
@@ -1617,7 +1649,6 @@ stage "Сервисы на хосте"
 say "Внутри контейнера 127.0.0.1 и localhost означают сам контейнер. Если конфиг opencode"
 say "ходит в локальный прокси или MCP-сервер на хосте, порт надо пробросить на хост."
 found_ports=$(config_loopback_ports "$HOST_OPENCODE_CONFIG")
-port_list=""
 if [[ -n "$found_ports" ]]; then
   say "В конфиге нашёл локальные порты:"
   for port in ${found_ports//,/ }; do
@@ -1627,22 +1658,10 @@ if [[ -n "$found_ports" ]]; then
       step "$port: на хосте сейчас никто не слушает, запусти сервис до работы с opencode"
     fi
   done
-  if confirm "Пробросить эти порты?"; then
-    port_list="$found_ports"
-  fi
 else
   say "Локальных адресов в конфиге не нашёл."
 fi
-if [[ -z "$port_list" ]]; then
-  while true; do
-    ask HOST_LOOPBACK_PORTS "Порты через запятую (Enter — без проброса):"
-    port_list="${HOST_LOOPBACK_PORTS:-}"
-    port_list="${port_list// /}"
-    [[ "$port_list" =~ ^([0-9]+(,[0-9]+)*)?$ ]] && break
-    warn "нужен список чисел через запятую, например 17321,8080"
-  done
-fi
-write_env HOST_LOOPBACK_PORTS "$port_list"
+configure_host_ports "$found_ports"
 pause "Enter, чтобы продолжить"
 
 # ── 11 ────────────────────────────────────────────────────────────────────

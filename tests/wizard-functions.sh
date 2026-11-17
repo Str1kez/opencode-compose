@@ -39,6 +39,31 @@ printf "GIT_SSH_COMMAND='ssh -i /run/git-ssh/id'\nINSTALL_UV='1'\n" > "$work/rer
 )
 pass "re-run: saved git push and python profile are the Enter default"
 
+# Host ports: a no forwards nothing and asks nothing else; Enter keeps the earlier choice.
+mkdir -p "$work/ports"
+(
+  ENV_FILE="$work/ports/.env"
+  : > "$ENV_FILE"
+  configure_host_ports "17321,8080" <<< "n" > "$work/ports/declined"
+  [[ -z "$(_existing HOST_LOOPBACK_PORTS || true)" ]] || fail "n on found ports still forwarded them"
+  ! grep -q 'через запятую' "$work/ports/declined" || fail "n on found ports asked for a list"
+
+  : > "$ENV_FILE"
+  configure_host_ports "17321,8080" <<< "" > /dev/null
+  [[ "$(_existing HOST_LOOPBACK_PORTS)" == "17321,8080" ]] || fail "first run: Enter did not forward found ports"
+
+  configure_host_ports "" <<< $'\n\n' > /dev/null
+  [[ "$(_existing HOST_LOOPBACK_PORTS)" == "17321,8080" ]] || fail "re-run: Enter dropped saved ports"
+  configure_host_ports "" <<< "n" > /dev/null
+  [[ -z "$(_existing HOST_LOOPBACK_PORTS || true)" ]] || fail "re-run: n kept saved ports"
+  configure_host_ports "17321" <<< "" > /dev/null
+  [[ -z "$(_existing HOST_LOOPBACK_PORTS || true)" ]] || fail "re-run: Enter overrode a saved no"
+
+  configure_host_ports "" <<< $'y\n80;81\n 9000, 9001\n' > /dev/null
+  [[ "$(_existing HOST_LOOPBACK_PORTS)" == "9000,9001" ]] || fail "typed list not saved after a rejected one"
+)
+pass "host ports: no means no forwarding, Enter keeps the earlier choice"
+
 # uv comes from a PyPI index now: a re-run on an .env of the uv-image setup drops UV_REGISTRY,
 # keeps the profile and asks for the index; a malformed index URL is asked again.
 mkdir -p "$work/uv-index"
