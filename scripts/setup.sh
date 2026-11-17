@@ -1318,6 +1318,13 @@ install_apt_config() {
   say "✓ скопировал в $APT_CONFIG_DIR файлов: $copied"
 }
 
+# normalize_apt_packages LIST prints LIST sorted bytewise, without duplicates, single-spaced.
+# It goes into the image as a build argument, and the same set in another order would miss
+# the layer cache.
+normalize_apt_packages() {
+  printf '%s' "$1" | tr -s '[:space:]' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd' ' -
+}
+
 run_wizard() {
 
 TOTAL_STAGES=11
@@ -1529,7 +1536,7 @@ while true; do
   [[ "$EXTRA_APT_PACKAGES" =~ ^[a-z0-9.+:\ -]*$ ]] && break
   warn "имена apt-пакетов: строчные буквы, цифры и . + - :"
 done
-write_env EXTRA_APT_PACKAGES "$EXTRA_APT_PACKAGES"
+write_env EXTRA_APT_PACKAGES "$(normalize_apt_packages "$EXTRA_APT_PACKAGES")"
 printf '\n'
 # Written to $OVERRIDE_FILE in the "Дополнительные папки" stage.
 prepare_venv_overlays "$WORKSPACE"

@@ -769,3 +769,11 @@ mkdir -p "$os_dir"
   ! grep -q 'теряют' "$os_dir/log" || fail "added overlay warned as a lost one"
 )
 pass "venv override: a rewrite that drops overlays lists the projects that lose them"
+
+# EXTRA_APT_PACKAGES is a build argument: the same set typed in another order or with a
+# duplicate would miss the layer cache and reinstall every extra package.
+[[ "$(normalize_apt_packages "  libpq-dev build-essential   libpq-dev	libffi-dev ")" \
+  == "build-essential libffi-dev libpq-dev" ]] \
+  || fail "apt packages not sorted and deduplicated: '$(normalize_apt_packages "libpq-dev build-essential libpq-dev")'"
+[[ -z "$(normalize_apt_packages "  ")" ]] || fail "blank apt package list not empty"
+pass "apt packages: one order, no duplicates, single spaces"
