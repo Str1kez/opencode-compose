@@ -1701,8 +1701,7 @@ fi
 finish
 say "Веб-интерфейс: $server_url  (логин opencode, пароль в .env)"
 say "Ключи провайдеров хранятся в базе opencode, а не в конфиге. Если их нет в opencode.jsonc,"
-say "подключи провайдера в веб-интерфейсе или так:"
-say "  docker compose exec opencode opencode auth login --server http://127.0.0.1:4096"
+say "подключи провайдера в веб-интерфейсе."
 say "Лог: docker compose logs -f    Остановить: docker compose down"
 printf '\n'
 show_python_projects "$WORKSPACE"
