@@ -681,3 +681,67 @@ forged=$(venv_volume_name /work/playground \
   == "opencode-omeone-documents-developer-work-my-repos-2554644389" ]] \
   || fail "compose project name changed"
 pass "venv volume: forged CRC collision gets its own volume, home and project names unchanged"
+
+# A directory name with a newline once split the walk's output into a path outside the
+# workspace folder: the planted name below replays the path of a project next to it, which got
+# a .venv mount point and an overlay. Names with control characters are skipped whole, and
+# every path the walk yields lies in the workspace folder.
+tr="$work/traversal"
+ws="$tr/ws"
+outside="$tr/outside/victim"
+mkdir -p "$ws/real" "$outside/.git" "$ws/esc"$'\033'"[31m"
+: > "$ws/real/pyproject.toml"
+: > "$outside/pyproject.toml"
+: > "$ws/esc"$'\033'"[31m/pyproject.toml"
+mkdir -p "$ws/evil/a"$'\n'"$outside/.git"
+: > "$ws/evil/a"$'\n'"$outside/pyproject.toml"
+(
+  [[ "$(python_projects "$ws" 2> /dev/null)" == "$ws/real" ]] \
+    || fail "python projects: walk left the workspace folder: $(python_projects "$ws" 2> /dev/null)"
+  [[ -z "$(workspace_dirs_with "$ws" .git 2> /dev/null)" ]] \
+    || fail "repositories: walk left the workspace folder: $(workspace_dirs_with "$ws" .git 2> /dev/null)"
+  prepare_venv_overlays "$ws" > "$tr/log" 2>&1
+  [[ ! -e "$outside/.venv" ]] || fail "mount point created outside the workspace folder"
+  [[ "${VENV_OVERLAYS[*]}" == *" $ws/real/.venv" && ${#VENV_OVERLAYS[@]} == 1 ]] \
+    || fail "overlays: ${VENV_OVERLAYS[*]}"
+  grep -q 'управляющ' "$tr/log" || fail "skipped control-character names not reported: $(cat "$tr/log")"
+  ! grep -q $'\033' "$tr/log" || fail "raw escape sequence printed to the terminal"
+)
+pass "workspace walk: names with control characters skipped, nothing outside the workspace folder"
+
+# Remote URLs come from repositories the agent writes. The suggested `git remote set-url` is
+# quoted for the shell, a remote with control characters is skipped without echoing them, and
+# the container's push output reaches the terminal without them either.
+rc_dir="$work/remote-content"
+ws="$rc_dir/ws"
+mkdir -p "$rc_dir/run"
+git init -q -b main "$ws/subst"
+git -C "$ws/subst" remote add origin 'github.com:x/$(touch MARKER).git'
+git init -q -b main "$ws/ctrl"
+printf '[remote "origin"]\n\turl = "github.com:x/y.git\\nFAKE WIZARD LINE \033[31mred\033[0m"\n' >> "$ws/ctrl/.git/config"
+(
+  ssh_resolved() { printf 'ssh.github.com 443 git\n'; }
+  collect_ssh_hosts "$ws" > "$rc_dir/log" 2>&1
+  line=$(grep -F 'subst remote set-url' "$rc_dir/log") || { cat "$rc_dir/log"; fail "no set-url suggested"; }
+  line="${line#*• }"
+  (cd "$rc_dir/run" && bash -c "git() { printf '%s\n' \"\$@\" > args; }; $line")
+  [[ ! -e "$rc_dir/run/MARKER" ]] || fail "pasting the suggested set-url ran a command from the remote"
+  [[ "$(tail -n1 "$rc_dir/run/args")" == 'ssh://git@ssh.github.com:443/~/x/$(touch MARKER).git' ]] \
+    || fail "set-url got a mangled URL: $(tail -n1 "$rc_dir/run/args")"
+  ! grep -q $'\033' "$rc_dir/log" || fail "remote with an escape sequence echoed raw"
+  ! grep -q '^FAKE' "$rc_dir/log" || fail "remote with a newline forged a wizard line"
+  grep -q "$ws/ctrl.*управляющ" "$rc_dir/log" || fail "remote with control characters not reported"
+)
+printf 'gitlab.example.invalid %s\n' "$(cut -d' ' -f1,2 "$kh/hostkeys/gitlab.example.invalid.pub")" \
+  > "$pc/.git-ssh/known_hosts"
+(
+  cd "$pc"
+  ssh() { command ssh -F /dev/null "$@"; }
+  docker() { printf 'remote: \033[31mdenied\033[0m\n'; return 1; }
+  # shellcheck disable=SC2034  # read by check_git_push_from_container from wizard-lib.sh
+  WORKSPACE="$pc/ws"
+  check_git_push_from_container > "$pc/log" 2>&1
+  grep -q 'denied' "$pc/log" || fail "failed push output not shown"
+  ! grep -q $'\033' "$pc/log" || fail "push output printed with raw escape sequences"
+)
+pass "repository content: set-url quoted, control characters never reach the terminal"

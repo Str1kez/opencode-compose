@@ -297,13 +297,22 @@ drop_nested_paths() {
 # included) that holds an entry named NAME. No depth limit; symlinks are not followed, and
 # .git, .venv and node_modules are never entered, though they still match as NAME: with
 # NAME=.git it lists the repositories, a submodule's or worktree's .git file included.
+# The walk is NUL-separated: the agent names the directories, and a newline in a name would
+# split it into a path outside WORKSPACE. A path with any control character is skipped with
+# a warning on stderr, so the output is one clean path per line.
 workspace_dirs_with() {
-  local workspace="$1" name="$2" entry
-  while IFS= read -r entry; do
-    printf '%s\n' "${entry%/*}"
+  local workspace="$1" name="$2" entry dir
+  while IFS= read -r -d '' entry; do
+    dir="${entry%/*}"
+    if [[ "$dir" == *[[:cntrl:]]* ]]; then
+      warn "пропускаю $(printf '%q' "$dir"): в имени управляющие символы" >&2
+      continue
+    fi
+    [[ "$dir" == "$workspace" || "$dir" == "$workspace/"* ]] || continue
+    printf '%s\n' "$dir"
   done < <(find "$workspace" -mindepth 1 \
-    \( -name .git -o -name .venv -o -name node_modules \) -prune -name "$name" -print \
-    -o -name "$name" -print | LC_ALL=C sort)
+    \( -name .git -o -name .venv -o -name node_modules \) -prune -name "$name" -print0 \
+    -o -name "$name" -print0) | LC_ALL=C sort
 }
 
 # python_projects WORKSPACE prints the top python projects in WORKSPACE: directories with a
@@ -843,10 +852,13 @@ collect_ssh_hosts() {
   SSH_HOSTS=()
   SSH_REMOTES=()
   while IFS= read -r repo; do
-    # A path with a newline arrives in pieces that are no repository.
-    [[ -e "$repo/.git" ]] || continue
     if ! url=$(workspace_remote_url "$repo"); then
       note "в $repo нет git remote, пропускаю"
+      continue
+    fi
+    # The agent writes the remote: a newline or an escape sequence would forge wizard output.
+    if [[ "$url" == *[[:cntrl:]]* ]]; then
+      warn "$repo: в remote управляющие символы, пропускаю. Проверь его: git -C $(sh_quote "$repo") remote -v"
       continue
     fi
     if ! host_port=$(ssh_remote_host "$url"); then
@@ -859,7 +871,8 @@ collect_ssh_hosts() {
       if [[ "$(lowercase "$real_host")" != "$(lowercase "$host")" ]]; then
         warn "$repo: $host — псевдоним из ~/.ssh/config (на самом деле $real_host:$real_port). В контейнере этого конфига нет."
         warn "Remote через псевдоним не поддержан, пропускаю. Перепиши его на настоящий хост:"
-        step "git -C $repo remote set-url $(workspace_remote_name "$repo") $(explicit_remote_url "$url" "$real_host" "$real_port" "$real_user")"
+        step "$(shell_line git -C "$repo" remote set-url "$(workspace_remote_name "$repo")" \
+          "$(explicit_remote_url "$url" "$real_host" "$real_port" "$real_user")")"
         continue
       fi
     fi
@@ -1104,7 +1117,7 @@ check_git_push_from_container() {
       say "✓ push на $host проходит"
     else
       warn "push на $host не прошёл (визард на этом не останавливается):"
-      while IFS= read -r line; do note "  $line"; done <<< "$output"
+      while IFS= read -r line; do note "  ${line//[[:cntrl:]]/?}"; done <<< "$output"
     fi
   done
   if (( ! checked )); then
@@ -1165,8 +1178,6 @@ prepare_venv_overlays() {
   local workspace="$1" project volume
   VENV_OVERLAYS=()
   while IFS= read -r project; do
-    # A path with a newline arrives in pieces that are no project.
-    [[ -f "$project/pyproject.toml" ]] || continue
     if [[ ! -e "$project/.venv" ]]; then
       mkdir "$project/.venv" || warn "не смог создать $project/.venv: создай её сам, иначе Docker сделает её от root"
     fi
