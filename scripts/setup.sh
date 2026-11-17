@@ -220,6 +220,8 @@ readonly UV_PIP_INDEX_URL_PATTERN='^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9
 readonly KNOWN_HOSTS_FILE=".git-ssh/known_hosts"
 readonly CONTAINER_GIT_KEY="/run/git-ssh/id"
 readonly CONTAINER_KNOWN_HOSTS="/run/git-ssh/known_hosts"
+# Hex digits of sha256 in a .venv volume name: 64 bits, out of reach of a forged collision.
+readonly VENV_HASH_LENGTH=16
 # "VOLUME TARGET" per python project, filled by prepare_venv_overlays, written by
 # write_override_file.
 VENV_OVERLAYS=()
@@ -295,13 +297,22 @@ drop_nested_paths() {
 # included) that holds an entry named NAME. No depth limit; symlinks are not followed, and
 # .git, .venv and node_modules are never entered, though they still match as NAME: with
 # NAME=.git it lists the repositories, a submodule's or worktree's .git file included.
+# The walk is NUL-separated: the agent names the directories, and a newline in a name would
+# split it into a path outside WORKSPACE. A path with any control character is skipped with
+# a warning on stderr, so the output is one clean path per line.
 workspace_dirs_with() {
-  local workspace="$1" name="$2" entry
-  while IFS= read -r entry; do
-    printf '%s\n' "${entry%/*}"
+  local workspace="$1" name="$2" entry dir
+  while IFS= read -r -d '' entry; do
+    dir="${entry%/*}"
+    if [[ "$dir" == *[[:cntrl:]]* ]]; then
+      warn "пропускаю $(printf '%q' "$dir"): в имени управляющие символы" >&2
+      continue
+    fi
+    [[ "$dir" == "$workspace" || "$dir" == "$workspace/"* ]] || continue
+    printf '%s\n' "$dir"
   done < <(find "$workspace" -mindepth 1 \
-    \( -name .git -o -name .venv -o -name node_modules \) -prune -name "$name" -print \
-    -o -name "$name" -print | LC_ALL=C sort)
+    \( -name .git -o -name .venv -o -name node_modules \) -prune -name "$name" -print0 \
+    -o -name "$name" -print0) | LC_ALL=C sort
 }
 
 # python_projects WORKSPACE prints the top python projects in WORKSPACE: directories with a
@@ -769,6 +780,55 @@ normalize_key_path() {
   printf '%s' "$path"
 }
 
+# Prints an absolute PATH with every symlink resolved, the last component included.
+resolved_path() {
+  local path="$1" target hops=0
+  while [[ -L "$path" ]] && (( hops < 40 )); do
+    target=$(readlink "$path")
+    [[ "$target" == /* ]] || target="$(dirname "$path")/$target"
+    path="$target"
+    hops=$((hops + 1))
+  done
+  if [[ -d "$(dirname "$path")" ]]; then
+    path="$(cd "$(dirname "$path")" && pwd -P)/$(basename "$path")"
+  fi
+  printf '%s' "$path"
+}
+
+# path_inside PATH DIR: PATH is DIR or lies under it. Both resolved; the trailing slash keeps
+# /w/a-b out of /w/a.
+path_inside() {
+  local path="${1%/}" dir="${2%/}"
+  [[ "$path/" == "$dir/"* ]]
+}
+
+paths_overlap() {
+  path_inside "$1" "$2" || path_inside "$2" "$1"
+}
+
+# choose_workspace HARNESS asks for the workspace folder until it gets an existing one that
+# doesn't overlap HARNESS (the resolved harness checkout) and sets WORKSPACE to its resolved
+# path. The agent writes the whole workspace folder; the harness holds the compose files,
+# scripts/setup.sh, known_hosts and .env, which the host runs or reads on the next `up`.
+choose_workspace() {
+  local harness="$1"
+  while true; do
+    ask WORKSPACE "Путь к рабочей папке:" || return 1
+    WORKSPACE=$(expand_path "${WORKSPACE:-}")
+    if [[ -z "$WORKSPACE" || ! -d "$WORKSPACE" ]]; then
+      warn "папки '$WORKSPACE' нет"
+      continue
+    fi
+    WORKSPACE=$(cd "$WORKSPACE" && pwd -P)
+    if paths_overlap "$WORKSPACE" "$harness"; then
+      warn "$WORKSPACE и харнесс $harness вложены друг в друга. Агент перепишет compose-файлы"
+      warn "и скрипты харнесса и прочитает его .env, а следующий up выполнит это на хосте."
+      continue
+    fi
+    return 0
+  done
+}
+
 lowercase() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
@@ -792,10 +852,13 @@ collect_ssh_hosts() {
   SSH_HOSTS=()
   SSH_REMOTES=()
   while IFS= read -r repo; do
-    # A path with a newline arrives in pieces that are no repository.
-    [[ -e "$repo/.git" ]] || continue
     if ! url=$(workspace_remote_url "$repo"); then
       note "в $repo нет git remote, пропускаю"
+      continue
+    fi
+    # The agent writes the remote: a newline or an escape sequence would forge wizard output.
+    if [[ "$url" == *[[:cntrl:]]* ]]; then
+      warn "$repo: в remote управляющие символы, пропускаю. Проверь его: git -C $(sh_quote "$repo") remote -v"
       continue
     fi
     if ! host_port=$(ssh_remote_host "$url"); then
@@ -808,7 +871,8 @@ collect_ssh_hosts() {
       if [[ "$(lowercase "$real_host")" != "$(lowercase "$host")" ]]; then
         warn "$repo: $host — псевдоним из ~/.ssh/config (на самом деле $real_host:$real_port). В контейнере этого конфига нет."
         warn "Remote через псевдоним не поддержан, пропускаю. Перепиши его на настоящий хост:"
-        step "git -C $repo remote set-url $(workspace_remote_name "$repo") $(explicit_remote_url "$url" "$real_host" "$real_port" "$real_user")"
+        step "$(shell_line git -C "$repo" remote set-url "$(workspace_remote_name "$repo")" \
+          "$(explicit_remote_url "$url" "$real_host" "$real_port" "$real_user")")"
         continue
       fi
     fi
@@ -868,6 +932,11 @@ configure_git_ssh() {
     key=$(normalize_key_path "$key") || continue
     if [[ ! -f "$key" ]]; then
       warn "ключа '$choice' нет"
+      continue
+    fi
+    if path_inside "$(resolved_path "$key")" "$WORKSPACE"; then
+      warn "ключ $key лежит в рабочей папке: агент подменит его ссылкой на любой файл хоста,"
+      warn "и следующий up смонтирует тот файл в контейнер. Положи ключ вне рабочей папки."
       continue
     fi
     if key_has_no_passphrase "$key"; then
@@ -978,6 +1047,24 @@ write_override_file() {
   } > "$file"
 }
 
+# warn_lost_overlays FILE lists the python projects whose .venv volume FILE declares and
+# VENV_OVERLAYS no longer has: after a rewrite of FILE the container's uv sync writes their host
+# .venv. A pyproject.toml planted above them, in the workspace root say, drops them that way.
+# The paths are shown as FILE holds them, compose-escaped.
+warn_lost_overlays() {
+  local file="$1" overlay target kept="" lost=()
+  for overlay in ${VENV_OVERLAYS[@]+"${VENV_OVERLAYS[@]}"}; do
+    kept+="$(compose_escape "${overlay#* }")"$'\n'
+  done
+  while IFS= read -r target; do
+    grep -qxF -- "$target" <<< "$kept" || lost+=("$target")
+  done < <(sed -n 's/^        target: "\(.*\)"$/\1/p' "$file")
+  (( ${#lost[@]} )) || return 0
+  warn "эти питон-проекты теряют свой .venv в контейнере, uv sync оттуда перепишет их хостовый .venv:"
+  for target in "${lost[@]}"; do step "${target%/.venv}"; done
+  warn "Если ты их не убирал, ищи pyproject.toml над ними, например в корне рабочей папки."
+}
+
 # apply_override MOUNT... brings $OVERRIDE_FILE in line with the mounts and VENV_OVERLAYS.
 # An up-to-date file is left as is without a question. Returns 1 when the user declined to
 # overwrite an existing file, so the old file still stands, or when it couldn't be written.
@@ -992,6 +1079,9 @@ apply_override() {
     rm -f "$planned"
     warn "не смог собрать $OVERRIDE_FILE"
     return 1
+  fi
+  if [[ -f "$OVERRIDE_FILE" ]] && ! cmp -s "$planned" "$OVERRIDE_FILE"; then
+    warn_lost_overlays "$OVERRIDE_FILE"
   fi
   if [[ -f "$OVERRIDE_FILE" ]] && cmp -s "$planned" "$OVERRIDE_FILE"; then
     say "✓ $OVERRIDE_FILE уже такой, как нужно"
@@ -1048,7 +1138,7 @@ check_git_push_from_container() {
       say "✓ push на $host проходит"
     else
       warn "push на $host не прошёл (визард на этом не останавливается):"
-      while IFS= read -r line; do note "  $line"; done <<< "$output"
+      while IFS= read -r line; do note "  ${line//[[:cntrl:]]/?}"; done <<< "$output"
     fi
   done
   if (( ! checked )); then
@@ -1060,37 +1150,63 @@ path_checksum() {
   printf '%s' "$1" | cksum | cut -d' ' -f1
 }
 
-# workspace_slug PATH [KEY] prints a name suffix: a readable tail of PATH plus a checksum of
-# KEY (the whole PATH by default), so similar paths still get different names.
-workspace_slug() {
+# sha256_hex prints the sha256 of stdin in hex: sha256sum on Linux, shasum on macOS. Fails
+# when the host has neither.
+sha256_hex() {
+  local digest
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest=$(sha256sum)
+  elif command -v shasum >/dev/null 2>&1; then
+    digest=$(shasum -a 256)
+  else
+    return 1
+  fi
+  printf '%s' "${digest%% *}"
+}
+
+# path_tail PATH prints the readable part of a name: the tail of PATH in lowercase letters,
+# digits and dashes.
+path_tail() {
   local slug
   slug=$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '-' | tr -s '-' | tr '[:upper:]' '[:lower:]')
   slug="${slug#-}"; slug="${slug%-}"
   slug="${slug: -40}"; slug="${slug#-}"
-  printf '%s-%s' "$slug" "$(path_checksum "${2:-$1}")"
+  printf '%s' "$slug"
 }
 
-# venv_volume_name WORKSPACE PROJECT names the volume over PROJECT/.venv. The checksum covers
-# the workspace too: a project seen from two overlapping workspaces gets two volumes, and
-# their containers share no executables.
+# workspace_slug PATH prints a name suffix: a readable tail of PATH plus its checksum, so
+# similar paths still get different names.
+workspace_slug() {
+  printf '%s-%s' "$(path_tail "$1")" "$(path_checksum "$1")"
+}
+
+# venv_volume_name WORKSPACE PROJECT names the volume over PROJECT/.venv. The hash covers the
+# workspace too: a project seen from two overlapping workspaces gets two volumes, and their
+# containers share no executables. A hash, not the checksum: the names are global and the
+# agent picks the project paths, and a CRC collision is forged in milliseconds, which would
+# mount another workspace's .venv. Fails without a sha256 tool.
 venv_volume_name() {
-  local workspace="$1" project="$2"
-  printf 'opencode-venv-%s' "$(workspace_slug "$project" "$workspace"$'\n'"$project")"
+  local workspace="$1" project="$2" hash
+  hash=$(printf '%s\n%s' "$workspace" "$project" | sha256_hex) || return 1
+  (( ${#hash} >= VENV_HASH_LENGTH )) || return 1
+  printf 'opencode-venv-%s-%s' "$(path_tail "$project")" "${hash:0:VENV_HASH_LENGTH}"
 }
 
 # prepare_venv_overlays WORKSPACE fills VENV_OVERLAYS with "VOLUME TARGET" for the .venv of
 # every top python project, creates a missing host .venv as the mount point (otherwise
 # Docker creates it, as root on Linux) and prints the projects with the re-run warning.
 prepare_venv_overlays() {
-  local workspace="$1" project
+  local workspace="$1" project volume
   VENV_OVERLAYS=()
   while IFS= read -r project; do
-    # A path with a newline arrives in pieces that are no project.
-    [[ -f "$project/pyproject.toml" ]] || continue
     if [[ ! -e "$project/.venv" ]]; then
       mkdir "$project/.venv" || warn "не смог создать $project/.venv: создай её сам, иначе Docker сделает её от root"
     fi
-    VENV_OVERLAYS+=("$(venv_volume_name "$workspace" "$project") $project/.venv")
+    if ! volume=$(venv_volume_name "$workspace" "$project"); then
+      warn "на хосте нет ни sha256sum, ни shasum: не могу назвать .venv-volume для $project"
+      return 1
+    fi
+    VENV_OVERLAYS+=("$volume $project/.venv")
   done < <(python_projects "$workspace")
   show_python_projects "$workspace"
   warn "появился новый питон-проект — перезапусти визард. Без этого у него нет своего"
@@ -1202,6 +1318,13 @@ install_apt_config() {
   say "✓ скопировал в $APT_CONFIG_DIR файлов: $copied"
 }
 
+# normalize_apt_packages LIST prints LIST sorted bytewise, without duplicates, single-spaced.
+# It goes into the image as a build argument, and the same set in another order would miss
+# the layer cache.
+normalize_apt_packages() {
+  printf '%s' "$1" | tr -s '[:space:]' '\n' | sed '/^$/d' | LC_ALL=C sort -u | paste -sd' ' -
+}
+
 run_wizard() {
 
 TOTAL_STAGES=11
@@ -1276,19 +1399,13 @@ say "файлов, dotfiles и чужих проектов."
 warn "Внутри рабочей папки изоляции между репозиториями нет: агент из одного пишет в код,"
 note ".git и читает ключи остальных. Разный уровень доверия разводится только разными"
 note "рабочими папками, то есть разными контейнерами."
+note "Харнесс (папка с этим визардом) не может лежать в рабочей папке, и рабочая папка в нём"
+note "тоже: агент переписал бы его compose-файлы и скрипты."
 saved_workspace=$(_existing WORKSPACE || true)
 if [[ -n "$saved_workspace" && -d "$saved_workspace" ]]; then
   saved_workspace=$(cd "$saved_workspace" && pwd -P)
 fi
-while true; do
-  ask WORKSPACE "Путь к рабочей папке:"
-  WORKSPACE=$(expand_path "${WORKSPACE:-}")
-  if [[ -n "$WORKSPACE" && -d "$WORKSPACE" ]]; then
-    WORKSPACE=$(cd "$WORKSPACE" && pwd -P)
-    break
-  fi
-  warn "папки '$WORKSPACE' нет"
-done
+choose_workspace "$(pwd -P)"
 warn_nested_repositories "$WORKSPACE"
 write_env WORKSPACE "$WORKSPACE"
 save_workspace_identity "$WORKSPACE" "$saved_workspace"
@@ -1419,7 +1536,7 @@ while true; do
   [[ "$EXTRA_APT_PACKAGES" =~ ^[a-z0-9.+:\ -]*$ ]] && break
   warn "имена apt-пакетов: строчные буквы, цифры и . + - :"
 done
-write_env EXTRA_APT_PACKAGES "$EXTRA_APT_PACKAGES"
+write_env EXTRA_APT_PACKAGES "$(normalize_apt_packages "$EXTRA_APT_PACKAGES")"
 printf '\n'
 # Written to $OVERRIDE_FILE in the "Дополнительные папки" stage.
 prepare_venv_overlays "$WORKSPACE"

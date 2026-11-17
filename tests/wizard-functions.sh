@@ -622,3 +622,158 @@ mkdir -p "$sp/svc/api" "$sp/lib" "$work/summary-none"
   [[ -n "$(show_python_projects "$work/summary-none")" ]] || fail "summary without python projects is silent"
 )
 pass "summary: python projects listed again at the end"
+
+# The harness checkout must not overlap the workspace folder: the agent writes the whole
+# folder, and the harness holds the compose files, scripts/setup.sh, known_hosts and .env that
+# the host runs on the next `up`. Compared by resolved path, with a trailing slash, so a
+# sibling that shares a prefix is fine.
+hw="$work/harness-overlap"
+mkdir -p "$hw/harness/docker" "$hw/harness-b"
+ln -s "$hw" "$work/harness-link"
+: > "$hw/.env"
+(
+  ENV_FILE="$hw/.env"
+  choose_workspace "$hw/harness" > "$hw/log" 2>&1 \
+    <<< "$work/harness-link"$'\n'"$hw"$'\n'"$hw/harness"$'\n'"$hw/harness/docker"$'\n'"$hw/harness-b"
+  [[ "$WORKSPACE" == "$hw/harness-b" ]] || fail "workspace next to the harness not accepted: $WORKSPACE"
+  [[ "$(grep -c 'вложены друг в друга' "$hw/log")" == 4 ]] || { cat "$hw/log"; fail "overlapping workspaces not all refused"; }
+)
+pass "workspace folder: refused when it holds the harness or lies inside it"
+
+# The deploy key must not lie in the workspace folder either, not even behind a symlink: the
+# agent would swap it for a link to any host file, which the next `up` mounts into the container.
+ki="$work/key-inside"
+mkdir -p "$ki/elsewhere"
+ssh-keygen -q -t ed25519 -N '' -f "$kh/ws/id_inside"
+ln -s "$kh/ws/id_inside" "$ki/elsewhere/id_link"
+(
+  cd "$ki"
+  HOME="$kh/home"
+  ENV_FILE="$ki/.env"
+  # shellcheck disable=SC2034  # read by configure_git_ssh from wizard-lib.sh
+  WORKSPACE="$kh/ws"
+  ssh() { command ssh -F /dev/null "$@"; }
+  ssh-keyscan() { printf '%s\n' "$*" >> "$ki/scans"; }
+  if configure_git_ssh > "$ki/log" 2>&1 <<< "$kh/ws/id_inside"$'\n'"$ki/elsewhere/id_link"$'\n-'; then
+    fail "key inside the workspace folder was accepted"
+  fi
+  [[ "$(grep -c 'лежит в рабочей папке' "$ki/log")" == 2 ]] || { cat "$ki/log"; fail "key inside the workspace not refused twice"; }
+  [[ -z "$(_existing GIT_SSH_KEY || true)" ]] || fail "key inside the workspace saved to .env"
+  [[ ! -e "$ki/scans" ]] || fail "key inside the workspace got as far as ssh-keyscan"
+)
+rm "$kh/ws/id_inside" "$kh/ws/id_inside.pub"
+pass "git ssh: key inside the workspace folder refused, directly and through a symlink"
+
+# .venv volume names are global (`name:`), and the agent picks the project paths: with a CRC
+# suffix a project in one workspace folder could forge the volume of another's and mount its
+# .venv. The pair below collides under cksum. Home volume and compose project keep their names
+# byte for byte: the user picks their path, and a rename would drop logins and orphan containers.
+trusted=$(venv_volume_name /work/trusted /work/trusted/payments-service-with-long-name)
+forged=$(venv_volume_name /work/playground \
+  /work/playground/aabbbbabbbbbabbaabababaaabaabaabaaaaaaaa/trusted-payments-service-with-long-name)
+[[ "$trusted" != "$forged" ]] || fail "forged project path took another workspace's venv volume: $forged"
+[[ "$trusted" =~ ^opencode-venv-trusted-payments-service-with-long-name-[0-9a-f]{16}$ ]] \
+  || fail "venv volume name lost its readable tail or hash: $trusted"
+[[ "$(home_volume_name /Users/someone/Documents/developer/work/my-repos)" \
+  == "opencode-home-omeone-documents-developer-work-my-repos-2554644389" ]] \
+  || fail "home volume name changed: $(home_volume_name /Users/someone/Documents/developer/work/my-repos)"
+[[ "$(compose_project_name /Users/someone/Documents/developer/work/my-repos)" \
+  == "opencode-omeone-documents-developer-work-my-repos-2554644389" ]] \
+  || fail "compose project name changed"
+pass "venv volume: forged CRC collision gets its own volume, home and project names unchanged"
+
+# A directory name with a newline once split the walk's output into a path outside the
+# workspace folder: the planted name below replays the path of a project next to it, which got
+# a .venv mount point and an overlay. Names with control characters are skipped whole, and
+# every path the walk yields lies in the workspace folder.
+tr="$work/traversal"
+ws="$tr/ws"
+outside="$tr/outside/victim"
+mkdir -p "$ws/real" "$outside/.git" "$ws/esc"$'\033'"[31m"
+: > "$ws/real/pyproject.toml"
+: > "$outside/pyproject.toml"
+: > "$ws/esc"$'\033'"[31m/pyproject.toml"
+mkdir -p "$ws/evil/a"$'\n'"$outside/.git"
+: > "$ws/evil/a"$'\n'"$outside/pyproject.toml"
+(
+  [[ "$(python_projects "$ws" 2> /dev/null)" == "$ws/real" ]] \
+    || fail "python projects: walk left the workspace folder: $(python_projects "$ws" 2> /dev/null)"
+  [[ -z "$(workspace_dirs_with "$ws" .git 2> /dev/null)" ]] \
+    || fail "repositories: walk left the workspace folder: $(workspace_dirs_with "$ws" .git 2> /dev/null)"
+  prepare_venv_overlays "$ws" > "$tr/log" 2>&1
+  [[ ! -e "$outside/.venv" ]] || fail "mount point created outside the workspace folder"
+  [[ "${VENV_OVERLAYS[*]}" == *" $ws/real/.venv" && ${#VENV_OVERLAYS[@]} == 1 ]] \
+    || fail "overlays: ${VENV_OVERLAYS[*]}"
+  grep -q 'управляющ' "$tr/log" || fail "skipped control-character names not reported: $(cat "$tr/log")"
+  ! grep -q $'\033' "$tr/log" || fail "raw escape sequence printed to the terminal"
+)
+pass "workspace walk: names with control characters skipped, nothing outside the workspace folder"
+
+# Remote URLs come from repositories the agent writes. The suggested `git remote set-url` is
+# quoted for the shell, a remote with control characters is skipped without echoing them, and
+# the container's push output reaches the terminal without them either.
+rc_dir="$work/remote-content"
+ws="$rc_dir/ws"
+mkdir -p "$rc_dir/run"
+git init -q -b main "$ws/subst"
+git -C "$ws/subst" remote add origin 'github.com:x/$(touch MARKER).git'
+git init -q -b main "$ws/ctrl"
+printf '[remote "origin"]\n\turl = "github.com:x/y.git\\nFAKE WIZARD LINE \033[31mred\033[0m"\n' >> "$ws/ctrl/.git/config"
+(
+  ssh_resolved() { printf 'ssh.github.com 443 git\n'; }
+  collect_ssh_hosts "$ws" > "$rc_dir/log" 2>&1
+  line=$(grep -F 'subst remote set-url' "$rc_dir/log") || { cat "$rc_dir/log"; fail "no set-url suggested"; }
+  line="${line#*• }"
+  (cd "$rc_dir/run" && bash -c "git() { printf '%s\n' \"\$@\" > args; }; $line")
+  [[ ! -e "$rc_dir/run/MARKER" ]] || fail "pasting the suggested set-url ran a command from the remote"
+  [[ "$(tail -n1 "$rc_dir/run/args")" == 'ssh://git@ssh.github.com:443/~/x/$(touch MARKER).git' ]] \
+    || fail "set-url got a mangled URL: $(tail -n1 "$rc_dir/run/args")"
+  ! grep -q $'\033' "$rc_dir/log" || fail "remote with an escape sequence echoed raw"
+  ! grep -q '^FAKE' "$rc_dir/log" || fail "remote with a newline forged a wizard line"
+  grep -q "$ws/ctrl.*управляющ" "$rc_dir/log" || fail "remote with control characters not reported"
+)
+printf 'gitlab.example.invalid %s\n' "$(cut -d' ' -f1,2 "$kh/hostkeys/gitlab.example.invalid.pub")" \
+  > "$pc/.git-ssh/known_hosts"
+(
+  cd "$pc"
+  ssh() { command ssh -F /dev/null "$@"; }
+  docker() { printf 'remote: \033[31mdenied\033[0m\n'; return 1; }
+  # shellcheck disable=SC2034  # read by check_git_push_from_container from wizard-lib.sh
+  WORKSPACE="$pc/ws"
+  check_git_push_from_container > "$pc/log" 2>&1
+  grep -q 'denied' "$pc/log" || fail "failed push output not shown"
+  ! grep -q $'\033' "$pc/log" || fail "push output printed with raw escape sequences"
+)
+pass "repository content: set-url quoted, control characters never reach the terminal"
+
+# A pyproject.toml planted at the workspace root turns every python project into a subproject,
+# and the next override drops their .venv volumes: the container's uv sync then writes their
+# host .venv. A rewrite that takes overlays away names those projects before it asks.
+os_dir="$work/overlay-shrink"
+mkdir -p "$os_dir"
+(
+  cd "$os_dir"
+  VENV_OVERLAYS=("opencode-venv-a-1 /w/a/.venv" "opencode-venv-b-2 /w/b/.venv")
+  apply_override > /dev/null < /dev/null || fail "first override not written"
+  before=$(cat "$OVERRIDE_FILE")
+
+  VENV_OVERLAYS=("opencode-venv-w-3 /w/.venv")
+  ! apply_override > "$os_dir/log" 2>&1 <<< "n" || fail "declined override reported as applied"
+  grep -q 'теряют' "$os_dir/log" || fail "dropped overlays not warned about: $(cat "$os_dir/log")"
+  grep -qF '/w/a' "$os_dir/log" && grep -qF '/w/b' "$os_dir/log" \
+    || fail "projects that lose their overlay not listed: $(cat "$os_dir/log")"
+  [[ "$(cat "$OVERRIDE_FILE")" == "$before" ]] || fail "declined override was rewritten"
+
+  VENV_OVERLAYS=("opencode-venv-a-1 /w/a/.venv" "opencode-venv-b-2 /w/b/.venv" "opencode-venv-c-4 /w/c/.venv")
+  apply_override > "$os_dir/log" 2>&1 <<< "y" || fail "grown override not applied"
+  ! grep -q 'теряют' "$os_dir/log" || fail "added overlay warned as a lost one"
+)
+pass "venv override: a rewrite that drops overlays lists the projects that lose them"
+
+# EXTRA_APT_PACKAGES is a build argument: the same set typed in another order or with a
+# duplicate would miss the layer cache and reinstall every extra package.
+[[ "$(normalize_apt_packages "  libpq-dev build-essential   libpq-dev	libffi-dev ")" \
+  == "build-essential libffi-dev libpq-dev" ]] \
+  || fail "apt packages not sorted and deduplicated: '$(normalize_apt_packages "libpq-dev build-essential libpq-dev")'"
+[[ -z "$(normalize_apt_packages "  ")" ]] || fail "blank apt package list not empty"
+pass "apt packages: one order, no duplicates, single spaces"

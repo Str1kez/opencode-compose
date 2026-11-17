@@ -9,9 +9,9 @@
 # The caller runs this in one RUN on purpose: the *.conf copies are removed before the
 # layer is committed, so a mirror login or proxy never lands in the image. Sources and CAs
 # stay; they hold no secrets.
-# Lists are wiped instead of using an apt cache mount: a cache mount needs
-# /etc/apt/apt.conf.d/docker-clean removed and BuildKit cache state, while the wipe works
-# the same everywhere and keeps the layer small. The two are mutually exclusive.
+# The caller mounts BuildKit caches on /var/lib/apt/lists and /var/cache/apt: a rebuild
+# downloads only lists and packages that changed, and neither lands in the layer. Debian's
+# docker-clean hook empties /var/cache/apt after every install, so it is removed first.
 #
 # Usage: apt-install.sh PACKAGE...
 set -euo pipefail
@@ -19,6 +19,8 @@ set -euo pipefail
 shopt -s nullglob
 
 apt_dir=/tmp/apt
+
+rm -f /etc/apt/apt.conf.d/docker-clean
 
 sources=("$apt_dir"/*.sources "$apt_dir"/*.list)
 if [ "${#sources[@]}" -gt 0 ]; then
@@ -43,4 +45,3 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-cer
 # rebuild the bundle so the corporate certs are in it either way.
 update-ca-certificates
 rm -f /etc/apt/apt.conf.d/zz-build-*
-rm -rf /var/lib/apt/lists/*
