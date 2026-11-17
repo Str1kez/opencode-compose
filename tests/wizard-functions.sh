@@ -745,3 +745,27 @@ printf 'gitlab.example.invalid %s\n' "$(cut -d' ' -f1,2 "$kh/hostkeys/gitlab.exa
   ! grep -q $'\033' "$pc/log" || fail "push output printed with raw escape sequences"
 )
 pass "repository content: set-url quoted, control characters never reach the terminal"
+
+# A pyproject.toml planted at the workspace root turns every python project into a subproject,
+# and the next override drops their .venv volumes: the container's uv sync then writes their
+# host .venv. A rewrite that takes overlays away names those projects before it asks.
+os_dir="$work/overlay-shrink"
+mkdir -p "$os_dir"
+(
+  cd "$os_dir"
+  VENV_OVERLAYS=("opencode-venv-a-1 /w/a/.venv" "opencode-venv-b-2 /w/b/.venv")
+  apply_override > /dev/null < /dev/null || fail "first override not written"
+  before=$(cat "$OVERRIDE_FILE")
+
+  VENV_OVERLAYS=("opencode-venv-w-3 /w/.venv")
+  ! apply_override > "$os_dir/log" 2>&1 <<< "n" || fail "declined override reported as applied"
+  grep -q 'теряют' "$os_dir/log" || fail "dropped overlays not warned about: $(cat "$os_dir/log")"
+  grep -qF '/w/a' "$os_dir/log" && grep -qF '/w/b' "$os_dir/log" \
+    || fail "projects that lose their overlay not listed: $(cat "$os_dir/log")"
+  [[ "$(cat "$OVERRIDE_FILE")" == "$before" ]] || fail "declined override was rewritten"
+
+  VENV_OVERLAYS=("opencode-venv-a-1 /w/a/.venv" "opencode-venv-b-2 /w/b/.venv" "opencode-venv-c-4 /w/c/.venv")
+  apply_override > "$os_dir/log" 2>&1 <<< "y" || fail "grown override not applied"
+  ! grep -q 'теряют' "$os_dir/log" || fail "added overlay warned as a lost one"
+)
+pass "venv override: a rewrite that drops overlays lists the projects that lose them"

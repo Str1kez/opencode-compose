@@ -1047,6 +1047,24 @@ write_override_file() {
   } > "$file"
 }
 
+# warn_lost_overlays FILE lists the python projects whose .venv volume FILE declares and
+# VENV_OVERLAYS no longer has: after a rewrite of FILE the container's uv sync writes their host
+# .venv. A pyproject.toml planted above them, in the workspace root say, drops them that way.
+# The paths are shown as FILE holds them, compose-escaped.
+warn_lost_overlays() {
+  local file="$1" overlay target kept="" lost=()
+  for overlay in ${VENV_OVERLAYS[@]+"${VENV_OVERLAYS[@]}"}; do
+    kept+="$(compose_escape "${overlay#* }")"$'\n'
+  done
+  while IFS= read -r target; do
+    grep -qxF -- "$target" <<< "$kept" || lost+=("$target")
+  done < <(sed -n 's/^        target: "\(.*\)"$/\1/p' "$file")
+  (( ${#lost[@]} )) || return 0
+  warn "эти питон-проекты теряют свой .venv в контейнере, uv sync оттуда перепишет их хостовый .venv:"
+  for target in "${lost[@]}"; do step "${target%/.venv}"; done
+  warn "Если ты их не убирал, ищи pyproject.toml над ними, например в корне рабочей папки."
+}
+
 # apply_override MOUNT... brings $OVERRIDE_FILE in line with the mounts and VENV_OVERLAYS.
 # An up-to-date file is left as is without a question. Returns 1 when the user declined to
 # overwrite an existing file, so the old file still stands, or when it couldn't be written.
@@ -1061,6 +1079,9 @@ apply_override() {
     rm -f "$planned"
     warn "не смог собрать $OVERRIDE_FILE"
     return 1
+  fi
+  if [[ -f "$OVERRIDE_FILE" ]] && ! cmp -s "$planned" "$OVERRIDE_FILE"; then
+    warn_lost_overlays "$OVERRIDE_FILE"
   fi
   if [[ -f "$OVERRIDE_FILE" ]] && cmp -s "$planned" "$OVERRIDE_FILE"; then
     say "✓ $OVERRIDE_FILE уже такой, как нужно"
