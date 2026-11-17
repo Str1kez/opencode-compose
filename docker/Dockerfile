@@ -2,6 +2,8 @@ ARG BASE_IMAGE=debian:trixie-slim
 # 1 puts uv into the image (python profile). Global: it picks the uv stage below.
 ARG INSTALL_UV=0
 
+# DL3006: the tag comes with BASE_IMAGE, debian:trixie-slim by default.
+# hadolint ignore=DL3006
 FROM ${BASE_IMAGE} AS base
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -27,6 +29,7 @@ ARG UV_PIP_INDEX_URL=https://pypi.org/simple
 # --only-binary: uv's sdist builds through Rust. --cert: the system bundle, which holds
 # the corporate *.crt from docker/apt after apt-install.sh. The pip cache is a BuildKit
 # cache mount, not a layer; --require-hashes still checks every file taken from it.
+# hadolint ignore=DL3042
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=docker/uv-requirements.txt,target=/tmp/uv-requirements.txt \
     python3 -m pip install \
@@ -103,6 +106,8 @@ COPY --from=uv /out/ /usr/local/bin/
 # the image, so the mount points are created here, owned by opencode, or uv can't write
 # them. The wizard passes them one per line through docker-compose.override.yml.
 ARG VENV_MOUNT_POINTS=""
+# DL4006: pipefail is set by SHELL in the base stage, which this stage inherits.
+# hadolint ignore=DL4006
 RUN printf '%s\n' "$VENV_MOUNT_POINTS" | while IFS= read -r dir; do \
         [ -z "$dir" ] || install -d -o "$OPENCODE_UID" -g "$OPENCODE_GID" "$dir"; \
     done
