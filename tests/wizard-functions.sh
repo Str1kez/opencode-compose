@@ -5,6 +5,9 @@
 # engine detection. The docker CLI and the ssh config are faked at their boundary.
 #
 # Usage: tests/wizard-functions.sh
+# SC2016: a literal $ in single quotes is test data (quoting, command substitution in names).
+# SC2030, SC2031: every case runs in a subshell on purpose, so its globals don't leak.
+# shellcheck disable=SC2016,SC2030,SC2031
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -13,9 +16,8 @@ work=$(cd "$(mktemp -d "${TMPDIR:-/tmp}/wizard-functions.XXXXXX")" && pwd -P)
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok: $*"; }
 
-awk '/^run_wizard\(\) \{/ { exit } { print }' "$repo_root/scripts/setup.sh" > "$work/wizard-lib.sh"
-# shellcheck source=/dev/null
-source "$work/wizard-lib.sh"
+# shellcheck source=tests/load-wizard-lib.sh
+source "$repo_root/tests/load-wizard-lib.sh"
 
 # Re-run defaults (spec US19): Enter keeps what an earlier run saved.
 mkdir -p "$work/rerun"
@@ -39,6 +41,31 @@ printf "GIT_SSH_COMMAND='ssh -i /run/git-ssh/id'\nINSTALL_UV='1'\n" > "$work/rer
     || fail "first run: Enter must not turn the python profile on"
 )
 pass "re-run: saved git push and python profile are the Enter default"
+
+# Host ports: a no forwards nothing and asks nothing else; Enter keeps the earlier choice.
+mkdir -p "$work/ports"
+(
+  ENV_FILE="$work/ports/.env"
+  : > "$ENV_FILE"
+  configure_host_ports "17321,8080" <<< "n" > "$work/ports/declined"
+  [[ -z "$(_existing HOST_LOOPBACK_PORTS || true)" ]] || fail "n on found ports still forwarded them"
+  ! grep -q 'через запятую' "$work/ports/declined" || fail "n on found ports asked for a list"
+
+  : > "$ENV_FILE"
+  configure_host_ports "17321,8080" <<< "" > /dev/null
+  [[ "$(_existing HOST_LOOPBACK_PORTS)" == "17321,8080" ]] || fail "first run: Enter did not forward found ports"
+
+  configure_host_ports "" <<< $'\n\n' > /dev/null
+  [[ "$(_existing HOST_LOOPBACK_PORTS)" == "17321,8080" ]] || fail "re-run: Enter dropped saved ports"
+  configure_host_ports "" <<< "n" > /dev/null
+  [[ -z "$(_existing HOST_LOOPBACK_PORTS || true)" ]] || fail "re-run: n kept saved ports"
+  configure_host_ports "17321" <<< "" > /dev/null
+  [[ -z "$(_existing HOST_LOOPBACK_PORTS || true)" ]] || fail "re-run: Enter overrode a saved no"
+
+  configure_host_ports "" <<< $'y\n80;81\n 9000, 9001\n' > /dev/null
+  [[ "$(_existing HOST_LOOPBACK_PORTS)" == "9000,9001" ]] || fail "typed list not saved after a rejected one"
+)
+pass "host ports: no means no forwarding, Enter keeps the earlier choice"
 
 # uv comes from a PyPI index now: a re-run on an .env of the uv-image setup drops UV_REGISTRY,
 # keeps the profile and asks for the index; a malformed index URL is asked again.
@@ -186,8 +213,8 @@ mkdir -p "$work/nogit"
 rc=0
 colima_sees_workspace "$work/nogit" || rc=$?
 [[ "$rc" == 2 ]] || fail "workspace without .git must be reported as unverifiable (got $rc)"
-first=$(venv_volume_name "/work/a-b/c")
-second=$(venv_volume_name "/work/a/b-c")
+first=$(venv_volume_name "/work/a-b/c" "/work/a-b/c")
+second=$(venv_volume_name "/work/a/b-c" "/work/a/b-c")
 [[ "$first" != "$second" ]] || fail "similar paths share a venv volume"
 [[ "$first" =~ ^opencode-venv-[a-z0-9-]+$ ]] || fail "bad volume name: $first"
 pass "helpers: sh_quote, unverifiable mount, per-path venv volume"
@@ -298,6 +325,7 @@ pass "apt config: apt files copied, old set replaced, README kept"
 # colima mount probe: lima 2.x quotes `colima ssh` arguments itself, so a path quoted by the
 # wizard was quoted twice and an existing repository read as "not mounted".
 mkdir -p "$work/colima ws/it's/.git"
+touch "$work/colima ws/it's/.git/HEAD"
 (
   # shellcheck disable=SC2034  # read by colima_sees_workspace from wizard-lib.sh
   COLIMA_PROFILE=default
@@ -311,3 +339,470 @@ mkdir -p "$work/colima ws/it's/.git"
   colima_sees_workspace "$work/colima ws/it's" || fail "existing workspace reported as not mounted (rc $?)"
 )
 pass "colima probe: path with a space and a quote is found through a quoting colima ssh"
+
+# Python projects in a workspace folder (ADR 0003 after ADR 0005): every top pyproject.toml at
+# any depth gets its own .venv overlay, a subproject under another pyproject.toml doesn't, and
+# .git, .venv and node_modules stay out of the walk. a and a-b sort around a/ in byte order,
+# which once let a/nested slip past the nested-path filter.
+ws="$work/python-ws/ws"
+mkdir -p "$ws/a/nested" "$ws/a-b" "$ws/deep/x/y/svc" "$ws/mono/packages/api" "$ws/plain/src" \
+  "$ws/plain/.git/hooks" "$ws/plain/.venv/lib" "$ws/plain/node_modules/pkg" "$ws/frontend/.git"
+for project in a a/nested a-b deep/x/y/svc mono/packages/api \
+  plain/.git/hooks plain/.venv/lib plain/node_modules/pkg; do
+  : > "$ws/$project/pyproject.toml"
+done
+: > "$ws/plain/.git/HEAD"
+: > "$ws/frontend/.git/HEAD"
+found=$(python_projects "$ws" | LC_ALL=C sort | tr '\n' ' ')
+[[ "$found" == "$ws/a $ws/a-b $ws/deep/x/y/svc $ws/mono/packages/api " ]] \
+  || fail "python projects: got '$found'"
+repos=$(workspace_dirs_with "$ws" .git | tr '\n' ' ')
+[[ "$repos" == "$ws/frontend $ws/plain " ]] || fail "repositories: got '$repos'"
+
+single="$work/python-ws/single"
+mkdir -p "$single/tools/sub"
+: > "$single/pyproject.toml"
+: > "$single/tools/sub/pyproject.toml"
+[[ "$(python_projects "$single")" == "$single" ]] || fail "workspace as one python repository: got '$(python_projects "$single")'"
+pass "python projects: top pyproject.toml at any depth, nested and skipped dirs left out"
+
+# One .venv volume per top python project: the host .venv mount point is created when missing,
+# the list of python repositories and the re-clone warning are printed.
+mkdir -p "$ws/a-b/.venv/bin"
+: > "$ws/a-b/.venv/bin/python"
+prepare_venv_overlays "$ws" > "$work/python-ws/log"
+out=$(cat "$work/python-ws/log")
+for project in a a-b deep/x/y/svc mono/packages/api; do
+  [[ -d "$ws/$project/.venv" ]] || fail "no .venv mount point created in $project"
+  [[ "$out" == *"$project"* ]] || fail "python repository $project not listed: $out"
+done
+[[ -f "$ws/a-b/.venv/bin/python" ]] || fail "existing host .venv was touched"
+[[ ! -e "$ws/a/nested/.venv" && ! -e "$ws/plain/.venv/lib/.venv" ]] || fail "mount point created outside a top project"
+[[ "$out" == *"перезапусти визард"* ]] || fail "no re-run warning for a new python repository: $out"
+(( ${#VENV_OVERLAYS[@]} == 4 )) || fail "expected 4 overlays, got: ${VENV_OVERLAYS[*]}"
+targets=$(for overlay in "${VENV_OVERLAYS[@]}"; do printf '%s\n' "${overlay#* }"; done | LC_ALL=C sort | tr '\n' ' ')
+[[ "$targets" == "$ws/a-b/.venv $ws/a/.venv $ws/deep/x/y/svc/.venv $ws/mono/packages/api/.venv " ]] \
+  || fail "overlay targets: $targets"
+names=$(for overlay in "${VENV_OVERLAYS[@]}"; do printf '%s\n' "${overlay%% *}"; done)
+[[ "$(sort -u <<< "$names" | wc -l | tr -d ' ')" == 4 ]] || fail "projects share a venv volume: $names"
+while IFS= read -r name; do
+  [[ "$name" =~ ^opencode-venv-[a-z0-9-]+$ ]] || fail "bad venv volume name: $name"
+done <<< "$names"
+[[ "$(venv_volume_name "/w/one" "/w/one/proj")" != "$(venv_volume_name "/w" "/w/one/proj")" ]] \
+  || fail "one project seen from two workspaces shares a venv volume"
+
+prepare_venv_overlays "$single" > /dev/null
+[[ "${VENV_OVERLAYS[*]}" == "$(venv_volume_name "$single" "$single") $single/.venv" ]] \
+  || fail "workspace as one python repository: ${VENV_OVERLAYS[*]}"
+
+mkdir -p "$work/python-ws/none"
+prepare_venv_overlays "$work/python-ws/none" > "$work/python-ws/log"
+out=$(cat "$work/python-ws/log")
+(( ${#VENV_OVERLAYS[@]} == 0 )) || fail "overlays without python projects"
+[[ "$out" == *"перезапусти визард"* ]] || fail "no re-run warning without python repositories"
+pass "venv overlays: one volume per top project, mount points created, list and warning printed"
+
+# The overlays go to the override next to the read-only mounts. A re-run with the same
+# projects rewrites nothing and asks nothing; a declined rewrite with other projects is loud,
+# because the stale override leaves a host .venv to the container's uv sync.
+mkdir -p "$work/venv-override"
+(
+  cd "$work/venv-override"
+  SKIPPED=()
+  VENV_OVERLAYS=("opencode-venv-a-1 /w/a/.venv" 'opencode-venv-b-2 /w/q"uo$te/.venv')
+  apply_override "/key:/run/git-ssh/id" > /dev/null < /dev/null || fail "first override not written"
+  grep -qF '"/key:/run/git-ssh/id:ro"' "$OVERRIDE_FILE" || fail "read-only mount lost"
+  grep -qF 'target: "/w/a/.venv"' "$OVERRIDE_FILE" || fail "no overlay target for /w/a"
+  grep -qF 'target: "/w/q\"uo$$te/.venv"' "$OVERRIDE_FILE" || fail "overlay target not quoted for compose"
+  [[ "$(grep -c '^  opencode-venv-a-1:$' "$OVERRIDE_FILE")" == 1 ]] || fail "volume a not declared once"
+  grep -qF 'name: opencode-venv-b-2' "$OVERRIDE_FILE" || fail "volume b not named explicitly"
+  # A fresh volume takes the owner of its mount point from the image, so the image builds them.
+  grep -qF 'VENV_MOUNT_POINTS: "/w/a/.venv\n/w/q\"uo$$te/.venv"' "$OVERRIDE_FILE" \
+    || fail "mount points not passed to the image build"
+  before=$(cat "$OVERRIDE_FILE")
+
+  apply_override "/key:/run/git-ssh/id" > "$work/venv-override/log" < /dev/null \
+    || fail "unchanged override reported as not applied"
+  [[ "$(cat "$OVERRIDE_FILE")" == "$before" ]] || fail "re-run changed an up-to-date override"
+  ! grep -q 'Перезаписать' "$work/venv-override/log" || fail "re-run asked to overwrite an up-to-date override"
+
+  VENV_OVERLAYS+=("opencode-venv-c-3 /w/c/.venv")
+  ! apply_override "/key:/run/git-ssh/id" <<< "n" > /dev/null || fail "declined override reported as applied"
+  [[ "$(cat "$OVERRIDE_FILE")" == "$before" ]] || fail "declined override was rewritten"
+  [[ "${SKIPPED[*]}" == *"uv sync"* ]] || fail "declined override with python projects is silent: ${SKIPPED[*]}"
+
+  apply_override "/key:/run/git-ssh/id" <<< "y" > /dev/null || fail "accepted override not applied"
+  [[ "$(grep -c 'type: volume' "$OVERRIDE_FILE")" == 3 ]] || fail "overlays duplicated or lost after re-run"
+)
+pass "venv override: volumes written with the mounts, re-run idempotent, declined rewrite warned"
+
+# Workspace folder (ADR 0005): a folder that is itself a repository and holds nested ones gets
+# the opencode #51191 warning; a single repository and a plain folder of repositories don't.
+mkdir -p "$work/ws-nested/.git" "$work/ws-nested/libs/inner/.git" \
+  "$work/ws-single/.git" "$work/ws-single/node_modules/pkg/.git" \
+  "$work/ws-folder/a/.git" "$work/ws-folder/b/.git"
+(
+  out=$(warn_nested_repositories "$work/ws-nested")
+  [[ "$out" == *"#51191"* ]] || fail "repository with nested repositories: no #51191 warning"
+  [[ -z "$(warn_nested_repositories "$work/ws-single")" ]] \
+    || fail "single repository (git dirs only under node_modules) got a warning"
+  [[ -z "$(warn_nested_repositories "$work/ws-folder")" ]] \
+    || fail "folder of repositories that is not a repository got a warning"
+)
+pass "workspace folder: #51191 warning only for a repository with nested repositories"
+
+# colima mount probe for a workspace folder that is not a repository (ADR 0005): the marker is
+# a regular file of the folder; 0 when the VM sees it, 1 when the VM has only the directories
+# docker created there for the .venv mount points, 2 when the folder holds no file at all.
+mkdir -p "$work/folder-seen/it's a repo" "$work/folder-unseen/.venv" "$work/folder-unseen/other/.venv" \
+  "$work/folder-empty/repo/.venv"
+touch "$work/folder-seen/it's a repo/README" "$work/folder-unseen/other/pyproject.toml"
+(
+  # shellcheck disable=SC2034  # read by colima_sees_workspace from wizard-lib.sh
+  COLIMA_PROFILE=default
+  vm_hides=""
+  colima() {
+    while [[ "$1" != "--" ]]; do shift; done
+    shift
+    local script
+    script=$(cat)
+    # Under the hidden folder the VM holds only what docker created for bind mount points:
+    # the directories, never a file.
+    if [[ -n "$vm_hides" ]]; then
+      script=${script/test -e /test -d }
+    fi
+    sh -c "$script"
+  }
+  rc=0
+  colima_sees_workspace "$work/folder-seen" || rc=$?
+  [[ "$rc" == 0 ]] || fail "folder of repositories without .git, visible in the VM: got $rc"
+
+  vm_hides="$work/folder-unseen"
+  rc=0
+  colima_sees_workspace "$work/folder-unseen" || rc=$?
+  [[ "$rc" == 1 ]] || fail "folder of repositories without .git, hidden from the VM: got $rc"
+
+  rc=0
+  colima_sees_workspace "$work/folder-empty" || rc=$?
+  [[ "$rc" == 2 ]] || fail "workspace folder with no file must be unverifiable: got $rc"
+)
+pass "colima probe: workspace folder without .git is checked by a file, not a mount point"
+
+# Git over ssh for a workspace folder (ADR 0005): hosts come from the remotes of every
+# repository at any depth, a host shared by several repositories is scanned and confirmed once,
+# a refused fingerprint never reaches known_hosts, https and ~/.ssh/config alias remotes are
+# skipped with a message. ssh-keyscan is faked at its boundary with real host keys.
+kh="$work/known-hosts"
+ws="$kh/ws"
+mkdir -p "$kh/home/.ssh" "$kh/hostkeys" "$ws"
+ssh-keygen -q -t ed25519 -N '' -C deploy -f "$kh/home/.ssh/id_deploy"
+for host in gitlab.example.invalid other.example.invalid third.example.invalid; do
+  ssh-keygen -q -t ed25519 -N '' -f "$kh/hostkeys/$host"
+done
+add_repo() {
+  git init -q -b main "$ws/$1"
+  [[ -z "${2:-}" ]] || git -C "$ws/$1" remote add origin "$2"
+}
+add_repo a "git@gitlab.example.invalid:grp/a.git"
+add_repo b/deep/c "ssh://git@GitLab.example.invalid/grp/c.git"
+add_repo d "https://github.com/grp/d.git"
+add_repo e "git@gl-alias:grp/e.git"
+add_repo f "git@other.example.invalid:grp/f.git"
+add_repo g "ssh://git@third.example.invalid:2222/grp/g.git"
+add_repo h
+cat > "$kh/ssh_config" <<'SSHCONF'
+Host gl-alias
+  HostName gitlab.example.invalid
+SSHCONF
+(
+  cd "$kh"
+  HOME="$kh/home"
+  ENV_FILE="$kh/.env"
+  # shellcheck disable=SC2034  # read by configure_git_ssh from wizard-lib.sh
+  WORKSPACE="$ws"
+  ssh() { command ssh -F "$kh/ssh_config" "$@"; }
+  ssh-keyscan() {
+    local port=22 host
+    while (( $# > 1 )); do
+      [[ "$1" == -p ]] && port="$2"
+      shift
+    done
+    host="$1"
+    printf '%s\n' "$host:$port" >> "$kh/scans"
+    [[ -f "$kh/hostkeys/$host.pub" ]] || return 1
+    [[ "$port" == 22 ]] || host="[$host]:$port"
+    printf '%s %s\n' "$host" "$(cut -d' ' -f1,2 "$kh/hostkeys/${1}.pub")"
+  }
+  SKIPPED=()
+  extra_mounts=()
+  # Key 1, then the fingerprints: gitlab yes, other yes, third no.
+  configure_git_ssh > "$kh/log" 2>&1 <<< $'1\ny\ny\nn' || { cat "$kh/log"; fail "workspace folder: git ssh stage failed"; }
+  [[ "$(cat "$kh/scans")" == $'gitlab.example.invalid:22\nother.example.invalid:22\nthird.example.invalid:2222' ]] \
+    || fail "hosts scanned: $(cat "$kh/scans")"
+  [[ "$(grep -c 'Fingerprint совпадает' "$kh/log")" == 3 ]] || fail "each new host must be confirmed exactly once"
+  ssh-keygen -F gitlab.example.invalid -f "$KNOWN_HOSTS_FILE" > /dev/null || fail "confirmed host gitlab not in known_hosts"
+  ssh-keygen -F other.example.invalid -f "$KNOWN_HOSTS_FILE" > /dev/null || fail "confirmed host other not in known_hosts"
+  ! grep -q third "$KNOWN_HOSTS_FILE" || fail "refused host third written to known_hosts"
+  [[ "$(grep -c gitlab "$KNOWN_HOSTS_FILE")" == 1 ]] || fail "shared host written twice"
+  [[ "${SKIPPED[*]}" == *third.example.invalid* ]] || fail "refused host is not in the to-do list: ${SKIPPED[*]}"
+  grep -q "$ws/d.*не ssh" "$kh/log" || fail "https remote not reported as skipped"
+  grep -q 'псевдоним' "$kh/log" || fail "alias remote not reported"
+  grep -qF "git -C $ws/e remote set-url origin git@gitlab.example.invalid:grp/e.git" "$kh/log" \
+    || fail "no real set-url form for the alias remote"
+  grep -q "$ws/h.*нет git remote" "$kh/log" || fail "repository without a remote not reported"
+  grep -q 'в каждый' "$kh/log" || fail "no reminder to add the key to every project"
+  [[ "$(_existing GIT_SSH_KEY)" == "$kh/home/.ssh/id_deploy" ]] || fail "key not saved"
+  [[ "${extra_mounts[*]}" == "$kh/home/.ssh/id_deploy:$CONTAINER_GIT_KEY $kh/$KNOWN_HOSTS_FILE:$CONTAINER_KNOWN_HOSTS" ]] \
+    || fail "mounts: ${extra_mounts[*]}"
+  gitlab_entry=$(grep gitlab "$KNOWN_HOSTS_FILE")
+
+  # Re-run: Enter keeps the key, only the host refused last time is asked again.
+  : > "$kh/scans"
+  extra_mounts=()
+  configure_git_ssh > "$kh/log" 2>&1 <<< $'\ny' || { cat "$kh/log"; fail "re-run: git ssh stage failed"; }
+  [[ "$(cat "$kh/scans")" == "third.example.invalid:2222" ]] || fail "re-run rescanned known hosts: $(cat "$kh/scans")"
+  [[ "$(grep -c 'Fingerprint совпадает' "$kh/log")" == 1 ]] || fail "re-run asked to confirm a known host"
+  [[ "$(_existing GIT_SSH_KEY)" == "$kh/home/.ssh/id_deploy" ]] || fail "re-run lost the key"
+  [[ "$(grep gitlab "$KNOWN_HOSTS_FILE")" == "$gitlab_entry" ]] || fail "re-run changed a known host"
+  ssh-keygen -F other.example.invalid -f "$KNOWN_HOSTS_FILE" > /dev/null || fail "re-run lost a known host"
+  ssh-keygen -F '[third.example.invalid]:2222' -f "$KNOWN_HOSTS_FILE" > /dev/null || fail "re-run: confirmed host not written"
+)
+pass "git ssh: hosts from every repository, shared host scanned once, refused host kept out, re-run asks only new hosts"
+
+# Refusing the only new host fails the stage and leaves known_hosts as it was.
+mkdir -p "$kh/refuse"
+(
+  cd "$kh/refuse"
+  HOME="$kh/home"
+  ENV_FILE="$kh/refuse/.env"
+  # shellcheck disable=SC2034  # read by configure_git_ssh from wizard-lib.sh
+  WORKSPACE="$ws/f"
+  ssh-keyscan() { printf '%s %s\n' "${!#}" "$(cut -d' ' -f1,2 "$kh/hostkeys/${!#}.pub")"; }
+  if configure_git_ssh > "$kh/refuse/log" 2>&1 <<< $'1\nn'; then
+    fail "refused fingerprint did not fail the stage"
+  fi
+  [[ ! -e "$KNOWN_HOSTS_FILE" ]] || fail "refused fingerprint created known_hosts"
+)
+pass "git ssh: refusing the only new host writes nothing and fails the stage"
+
+# Push check after the start (US16): one dry-run push from the container per ssh host that made
+# it into known_hosts, from a repository that pushes there. The workspace folder may itself be
+# a repository with an https remote, which has nothing to push over ssh; a host left out of
+# known_hosts gets no push, and a check with nothing to push says why. docker is faked at its
+# boundary.
+pc="$work/push-check"
+ws="$pc/ws"
+mkdir -p "$pc/.git-ssh" "$pc/https-only"
+git init -q -b main "$ws"
+git -C "$ws" remote add origin "https://github.com/grp/root.git"
+for repo in a/one a/two b/three; do git init -q -b main "$ws/$repo"; done
+git -C "$ws/a/one" remote add origin "git@gitlab.example.invalid:grp/one.git"
+git -C "$ws/a/two" remote add origin "ssh://git@gitlab.example.invalid/grp/two.git"
+git -C "$ws/b/three" remote add origin "git@other.example.invalid:grp/three.git"
+git init -q -b main "$pc/https-only"
+git -C "$pc/https-only" remote add origin "https://github.com/grp/only.git"
+printf 'gitlab.example.invalid %s\n' "$(cut -d' ' -f1,2 "$kh/hostkeys/gitlab.example.invalid.pub")" \
+  > "$pc/.git-ssh/known_hosts"
+(
+  cd "$pc"
+  ssh() { command ssh -F /dev/null "$@"; }
+  docker() { printf '%s\n' "$*" >> "$pc/pushes"; }
+  # shellcheck disable=SC2034  # read by check_git_push_from_container from wizard-lib.sh
+  WORKSPACE="$ws"
+  check_git_push_from_container > "$pc/log" 2>&1
+  [[ "$(cat "$pc/pushes")" == "compose exec -T opencode git -C $ws/a/one push --dry-run origin HEAD" ]] \
+    || { cat "$pc/log"; fail "push check: dry-runs $(cat "$pc/pushes")"; }
+  grep -q '✓' "$pc/log" || fail "push check: passed push not reported"
+
+  rm "$pc/pushes" "$pc/.git-ssh/known_hosts"
+  check_git_push_from_container > "$pc/log" 2>&1
+  [[ ! -e "$pc/pushes" ]] || fail "push check without known_hosts pushed: $(cat "$pc/pushes")"
+  grep -q 'known_hosts' "$pc/log" || fail "push check without known_hosts is silent: $(cat "$pc/log")"
+
+  WORKSPACE="$pc/https-only"
+  check_git_push_from_container > "$pc/log" 2>&1
+  [[ ! -e "$pc/pushes" ]] || fail "push check without ssh remotes pushed: $(cat "$pc/pushes")"
+  grep -q 'ssh' "$pc/log" || fail "push check without ssh remotes is silent: $(cat "$pc/log")"
+)
+pass "push check: one dry-run per known ssh host from a repository on it, nothing to check is said"
+
+# A read-only mount (a symlink target, the skills folder) may hold " or $: compose must take
+# it literally, as it does the .venv targets.
+(
+  VENV_OVERLAYS=()
+  write_override_file "$work/ro-mount.yml" '/x/q"uo$te:/x/q"uo$te'
+  grep -qF -- '- "/x/q\"uo$$te:/x/q\"uo$$te:ro"' "$work/ro-mount.yml" \
+    || fail "read-only mount not quoted for compose: $(cat "$work/ro-mount.yml")"
+)
+pass "override: read-only mount with \" and \$ quoted for compose"
+
+# The end of the wizard lists the python projects again (US12), so a lost one shows up there.
+sp="$work/summary-python"
+mkdir -p "$sp/svc/api" "$sp/lib" "$work/summary-none"
+: > "$sp/svc/api/pyproject.toml"
+: > "$sp/lib/pyproject.toml"
+(
+  prepare_venv_overlays "$sp" > /dev/null
+  out=$(show_python_projects "$sp")
+  [[ "$out" == *"lib"* && "$out" == *"svc/api"* ]] || fail "summary misses a python project: $out"
+
+  prepare_venv_overlays "$work/summary-none" > /dev/null
+  [[ -n "$(show_python_projects "$work/summary-none")" ]] || fail "summary without python projects is silent"
+)
+pass "summary: python projects listed again at the end"
+
+# The harness checkout must not overlap the workspace folder: the agent writes the whole
+# folder, and the harness holds the compose files, scripts/setup.sh, known_hosts and .env that
+# the host runs on the next `up`. Compared by resolved path, with a trailing slash, so a
+# sibling that shares a prefix is fine.
+hw="$work/harness-overlap"
+mkdir -p "$hw/harness/docker" "$hw/harness-b"
+ln -s "$hw" "$work/harness-link"
+: > "$hw/.env"
+(
+  ENV_FILE="$hw/.env"
+  choose_workspace "$hw/harness" > "$hw/log" 2>&1 \
+    <<< "$work/harness-link"$'\n'"$hw"$'\n'"$hw/harness"$'\n'"$hw/harness/docker"$'\n'"$hw/harness-b"
+  [[ "$WORKSPACE" == "$hw/harness-b" ]] || fail "workspace next to the harness not accepted: $WORKSPACE"
+  [[ "$(grep -c 'вложены друг в друга' "$hw/log")" == 4 ]] || { cat "$hw/log"; fail "overlapping workspaces not all refused"; }
+)
+pass "workspace folder: refused when it holds the harness or lies inside it"
+
+# The deploy key must not lie in the workspace folder either, not even behind a symlink: the
+# agent would swap it for a link to any host file, which the next `up` mounts into the container.
+ki="$work/key-inside"
+mkdir -p "$ki/elsewhere"
+ssh-keygen -q -t ed25519 -N '' -f "$kh/ws/id_inside"
+ln -s "$kh/ws/id_inside" "$ki/elsewhere/id_link"
+(
+  cd "$ki"
+  HOME="$kh/home"
+  ENV_FILE="$ki/.env"
+  # shellcheck disable=SC2034  # read by configure_git_ssh from wizard-lib.sh
+  WORKSPACE="$kh/ws"
+  ssh() { command ssh -F /dev/null "$@"; }
+  ssh-keyscan() { printf '%s\n' "$*" >> "$ki/scans"; }
+  if configure_git_ssh > "$ki/log" 2>&1 <<< "$kh/ws/id_inside"$'\n'"$ki/elsewhere/id_link"$'\n-'; then
+    fail "key inside the workspace folder was accepted"
+  fi
+  [[ "$(grep -c 'лежит в рабочей папке' "$ki/log")" == 2 ]] || { cat "$ki/log"; fail "key inside the workspace not refused twice"; }
+  [[ -z "$(_existing GIT_SSH_KEY || true)" ]] || fail "key inside the workspace saved to .env"
+  [[ ! -e "$ki/scans" ]] || fail "key inside the workspace got as far as ssh-keyscan"
+)
+rm "$kh/ws/id_inside" "$kh/ws/id_inside.pub"
+pass "git ssh: key inside the workspace folder refused, directly and through a symlink"
+
+# .venv volume names are global (`name:`), and the agent picks the project paths: with a CRC
+# suffix a project in one workspace folder could forge the volume of another's and mount its
+# .venv. The pair below collides under cksum. Home volume and compose project keep their names
+# byte for byte: the user picks their path, and a rename would drop logins and orphan containers.
+trusted=$(venv_volume_name /work/trusted /work/trusted/payments-service-with-long-name)
+forged=$(venv_volume_name /work/playground \
+  /work/playground/aabbbbabbbbbabbaabababaaabaabaabaaaaaaaa/trusted-payments-service-with-long-name)
+[[ "$trusted" != "$forged" ]] || fail "forged project path took another workspace's venv volume: $forged"
+[[ "$trusted" =~ ^opencode-venv-trusted-payments-service-with-long-name-[0-9a-f]{16}$ ]] \
+  || fail "venv volume name lost its readable tail or hash: $trusted"
+[[ "$(home_volume_name /Users/someone/Documents/developer/work/my-repos)" \
+  == "opencode-home-omeone-documents-developer-work-my-repos-2554644389" ]] \
+  || fail "home volume name changed: $(home_volume_name /Users/someone/Documents/developer/work/my-repos)"
+[[ "$(compose_project_name /Users/someone/Documents/developer/work/my-repos)" \
+  == "opencode-omeone-documents-developer-work-my-repos-2554644389" ]] \
+  || fail "compose project name changed"
+pass "venv volume: forged CRC collision gets its own volume, home and project names unchanged"
+
+# A directory name with a newline once split the walk's output into a path outside the
+# workspace folder: the planted name below replays the path of a project next to it, which got
+# a .venv mount point and an overlay. Names with control characters are skipped whole, and
+# every path the walk yields lies in the workspace folder.
+tr="$work/traversal"
+ws="$tr/ws"
+outside="$tr/outside/victim"
+mkdir -p "$ws/real" "$outside/.git" "$ws/esc"$'\033'"[31m"
+: > "$ws/real/pyproject.toml"
+: > "$outside/pyproject.toml"
+: > "$ws/esc"$'\033'"[31m/pyproject.toml"
+mkdir -p "$ws/evil/a"$'\n'"$outside/.git"
+: > "$ws/evil/a"$'\n'"$outside/pyproject.toml"
+(
+  [[ "$(python_projects "$ws" 2> /dev/null)" == "$ws/real" ]] \
+    || fail "python projects: walk left the workspace folder: $(python_projects "$ws" 2> /dev/null)"
+  [[ -z "$(workspace_dirs_with "$ws" .git 2> /dev/null)" ]] \
+    || fail "repositories: walk left the workspace folder: $(workspace_dirs_with "$ws" .git 2> /dev/null)"
+  prepare_venv_overlays "$ws" > "$tr/log" 2>&1
+  [[ ! -e "$outside/.venv" ]] || fail "mount point created outside the workspace folder"
+  [[ "${VENV_OVERLAYS[*]}" == *" $ws/real/.venv" && ${#VENV_OVERLAYS[@]} == 1 ]] \
+    || fail "overlays: ${VENV_OVERLAYS[*]}"
+  grep -q 'управляющ' "$tr/log" || fail "skipped control-character names not reported: $(cat "$tr/log")"
+  ! grep -q $'\033' "$tr/log" || fail "raw escape sequence printed to the terminal"
+)
+pass "workspace walk: names with control characters skipped, nothing outside the workspace folder"
+
+# Remote URLs come from repositories the agent writes. The suggested `git remote set-url` is
+# quoted for the shell, a remote with control characters is skipped without echoing them, and
+# the container's push output reaches the terminal without them either.
+rc_dir="$work/remote-content"
+ws="$rc_dir/ws"
+mkdir -p "$rc_dir/run"
+git init -q -b main "$ws/subst"
+git -C "$ws/subst" remote add origin 'github.com:x/$(touch MARKER).git'
+git init -q -b main "$ws/ctrl"
+printf '[remote "origin"]\n\turl = "github.com:x/y.git\\nFAKE WIZARD LINE \033[31mred\033[0m"\n' >> "$ws/ctrl/.git/config"
+(
+  ssh_resolved() { printf 'ssh.github.com 443 git\n'; }
+  collect_ssh_hosts "$ws" > "$rc_dir/log" 2>&1
+  line=$(grep -F 'subst remote set-url' "$rc_dir/log") || { cat "$rc_dir/log"; fail "no set-url suggested"; }
+  line="${line#*• }"
+  (cd "$rc_dir/run" && bash -c "git() { printf '%s\n' \"\$@\" > args; }; $line")
+  [[ ! -e "$rc_dir/run/MARKER" ]] || fail "pasting the suggested set-url ran a command from the remote"
+  [[ "$(tail -n1 "$rc_dir/run/args")" == 'ssh://git@ssh.github.com:443/~/x/$(touch MARKER).git' ]] \
+    || fail "set-url got a mangled URL: $(tail -n1 "$rc_dir/run/args")"
+  ! grep -q $'\033' "$rc_dir/log" || fail "remote with an escape sequence echoed raw"
+  ! grep -q '^FAKE' "$rc_dir/log" || fail "remote with a newline forged a wizard line"
+  grep -q "$ws/ctrl.*управляющ" "$rc_dir/log" || fail "remote with control characters not reported"
+)
+printf 'gitlab.example.invalid %s\n' "$(cut -d' ' -f1,2 "$kh/hostkeys/gitlab.example.invalid.pub")" \
+  > "$pc/.git-ssh/known_hosts"
+(
+  cd "$pc"
+  ssh() { command ssh -F /dev/null "$@"; }
+  docker() { printf 'remote: \033[31mdenied\033[0m\n'; return 1; }
+  # shellcheck disable=SC2034  # read by check_git_push_from_container from wizard-lib.sh
+  WORKSPACE="$pc/ws"
+  check_git_push_from_container > "$pc/log" 2>&1
+  grep -q 'denied' "$pc/log" || fail "failed push output not shown"
+  ! grep -q $'\033' "$pc/log" || fail "push output printed with raw escape sequences"
+)
+pass "repository content: set-url quoted, control characters never reach the terminal"
+
+# A pyproject.toml planted at the workspace root turns every python project into a subproject,
+# and the next override drops their .venv volumes: the container's uv sync then writes their
+# host .venv. A rewrite that takes overlays away names those projects before it asks.
+os_dir="$work/overlay-shrink"
+mkdir -p "$os_dir"
+(
+  cd "$os_dir"
+  VENV_OVERLAYS=("opencode-venv-a-1 /w/a/.venv" "opencode-venv-b-2 /w/b/.venv")
+  apply_override > /dev/null < /dev/null || fail "first override not written"
+  before=$(cat "$OVERRIDE_FILE")
+
+  VENV_OVERLAYS=("opencode-venv-w-3 /w/.venv")
+  ! apply_override > "$os_dir/log" 2>&1 <<< "n" || fail "declined override reported as applied"
+  grep -q 'теряют' "$os_dir/log" || fail "dropped overlays not warned about: $(cat "$os_dir/log")"
+  for project in /w/a /w/b; do
+    grep -qF "$project" "$os_dir/log" || fail "$project lost its overlay but is not listed: $(cat "$os_dir/log")"
+  done
+  [[ "$(cat "$OVERRIDE_FILE")" == "$before" ]] || fail "declined override was rewritten"
+
+  VENV_OVERLAYS=("opencode-venv-a-1 /w/a/.venv" "opencode-venv-b-2 /w/b/.venv" "opencode-venv-c-4 /w/c/.venv")
+  apply_override > "$os_dir/log" 2>&1 <<< "y" || fail "grown override not applied"
+  ! grep -q 'теряют' "$os_dir/log" || fail "added overlay warned as a lost one"
+)
+pass "venv override: a rewrite that drops overlays lists the projects that lose them"
+
+# EXTRA_APT_PACKAGES is a build argument: the same set typed in another order or with a
+# duplicate would miss the layer cache and reinstall every extra package.
+[[ "$(normalize_apt_packages "  libpq-dev build-essential   libpq-dev	libffi-dev ")" \
+  == "build-essential libffi-dev libpq-dev" ]] \
+  || fail "apt packages not sorted and deduplicated: '$(normalize_apt_packages "libpq-dev build-essential libpq-dev")'"
+[[ -z "$(normalize_apt_packages "  ")" ]] || fail "blank apt package list not empty"
+pass "apt packages: one order, no duplicates, single spaces"

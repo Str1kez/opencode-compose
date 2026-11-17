@@ -2,6 +2,8 @@ ARG BASE_IMAGE=debian:trixie-slim
 # 1 puts uv into the image (python profile). Global: it picks the uv stage below.
 ARG INSTALL_UV=0
 
+# DL3006: the tag comes with BASE_IMAGE, debian:trixie-slim by default.
+# hadolint ignore=DL3006
 FROM ${BASE_IMAGE} AS base
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -14,7 +16,9 @@ RUN mkdir /out
 # (no system python there, ADR 0003). python3-pip comes through the same corporate apt
 # setup and CAs as the final image.
 FROM base AS uv-1
-RUN --mount=type=bind,source=docker/apt,target=/tmp/apt \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=bind,source=docker/apt,target=/tmp/apt \
     --mount=type=bind,source=docker/apt-install.sh,target=/tmp/apt-install.sh \
     bash /tmp/apt-install.sh python3-pip
 # Declared after the apt step, so another index doesn't redo it. Only this stage sees it:
@@ -23,10 +27,12 @@ ARG UV_PIP_INDEX_URL=https://pypi.org/simple
 # --target: Debian marks its python externally managed (PEP 668) and pip refuses to
 # install into it; a target directory is not that environment, so nothing is overridden.
 # --only-binary: uv's sdist builds through Rust. --cert: the system bundle, which holds
-# the corporate *.crt from docker/apt after apt-install.sh.
-RUN --mount=type=bind,source=docker/uv-requirements.txt,target=/tmp/uv-requirements.txt \
+# the corporate *.crt from docker/apt after apt-install.sh. The pip cache is a BuildKit
+# cache mount, not a layer; --require-hashes still checks every file taken from it.
+# hadolint ignore=DL3042
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,source=docker/uv-requirements.txt,target=/tmp/uv-requirements.txt \
     python3 -m pip install \
-        --no-cache-dir \
         --disable-pip-version-check \
         --index-url "$UV_PIP_INDEX_URL" \
         --cert /etc/ssl/certs/ca-certificates.crt \
@@ -52,12 +58,11 @@ LABEL org.opencontainers.image.title="opencode-compose" \
 # socat: forwards HOST_LOOPBACK_PORTS from the container's 127.0.0.1 to the host.
 # make: most projects run their tasks through a Makefile, and the agent calls it too.
 # bash, tar and tzdata are already in debian slim, so they are not listed.
-# EXTRA_APT_PACKAGES: the project's toolchain, e.g. "build-essential libpq-dev" for a
-# python project. No system python or python3-dev: `uv sync` brings a standalone
-# python with headers. No version pins: BASE_IMAGE is arbitrary and pins would not
-# resolve on another one.
-ARG EXTRA_APT_PACKAGES=""
-RUN --mount=type=bind,source=docker/apt,target=/tmp/apt \
+# No version pins: BASE_IMAGE is arbitrary and pins would not resolve on another one.
+# apt lists and downloaded .debs stay in BuildKit cache mounts between builds.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=bind,source=docker/apt,target=/tmp/apt \
     --mount=type=bind,source=docker/apt-install.sh,target=/tmp/apt-install.sh \
     bash /tmp/apt-install.sh \
         curl \
@@ -66,8 +71,18 @@ RUN --mount=type=bind,source=docker/apt,target=/tmp/apt \
         openssh-client \
         procps \
         ripgrep \
-        socat \
-        ${EXTRA_APT_PACKAGES}
+        socat
+
+# EXTRA_APT_PACKAGES: the project's toolchain, e.g. "build-essential libpq-dev" for a
+# python project. No system python or python3-dev: `uv sync` brings a standalone
+# python with headers. Declared after the base packages and installed in a step of its
+# own, so another list reinstalls only the extras.
+ARG EXTRA_APT_PACKAGES=""
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=bind,source=docker/apt,target=/tmp/apt \
+    --mount=type=bind,source=docker/apt-install.sh,target=/tmp/apt-install.sh \
+    if [ -n "$EXTRA_APT_PACKAGES" ]; then bash /tmp/apt-install.sh $EXTRA_APT_PACKAGES; fi
 
 ARG OPENCODE_UID=1000
 ARG OPENCODE_GID=1000
@@ -86,13 +101,16 @@ RUN user=$(awk -F: -v uid="$OPENCODE_UID" '$3 == uid { print $1 }' /etc/passwd);
 # Empty with INSTALL_UV=0, the uv binary with INSTALL_UV=1.
 COPY --from=uv /out/ /usr/local/bin/
 
-# A named volume mounted over WORKSPACE/.venv keeps the container venv apart from the
-# host one (ADR 0003). A fresh volume copies the owner of its mount point from the
-# image, so the mount point is created here, owned by opencode, or uv can't write it.
-ARG WORKSPACE=""
-RUN if [ -n "$WORKSPACE" ]; then \
-        install -d -o "$OPENCODE_UID" -g "$OPENCODE_GID" "$WORKSPACE/.venv"; \
-    fi
+# A named volume over the .venv of every python project keeps the container venv apart
+# from the host one (ADR 0003). A fresh volume copies the owner of its mount point from
+# the image, so the mount points are created here, owned by opencode, or uv can't write
+# them. The wizard passes them one per line through docker-compose.override.yml.
+ARG VENV_MOUNT_POINTS=""
+# DL4006: pipefail is set by SHELL in the base stage, which this stage inherits.
+# hadolint ignore=DL4006
+RUN printf '%s\n' "$VENV_MOUNT_POINTS" | while IFS= read -r dir; do \
+        [ -z "$dir" ] || install -d -o "$OPENCODE_UID" -g "$OPENCODE_GID" "$dir"; \
+    done
 
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY --chmod=755 docker/opencode-update.sh /usr/local/bin/opencode-update
