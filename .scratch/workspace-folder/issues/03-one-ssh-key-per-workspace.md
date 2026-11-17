@@ -8,7 +8,7 @@
 
 **Blocked by:** 02 (общий обход рабочей папки).
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 **Исполнение:** агент
 

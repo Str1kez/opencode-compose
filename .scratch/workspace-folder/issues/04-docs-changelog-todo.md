@@ -6,7 +6,7 @@ README пишется для того, кто пользуется, а не ра
 
 **Blocked by:** 01, 02, 03 (README описывает итоговое поведение).
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 **Исполнение:** агент
 
